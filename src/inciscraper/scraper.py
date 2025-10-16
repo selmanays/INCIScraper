@@ -1240,6 +1240,8 @@ class INCIScraper:
         alternative_hosts = list(self._host_alternatives.get(canonical_host or "", []))
         alt_index = 0
 
+        used_failover_host = False
+
         for attempt in range(1, attempts + 1):
             LOGGER.debug("Downloading %s (attempt %s/%s)", current_url, attempt, attempts)
             req = request.Request(current_url, headers={"User-Agent": USER_AGENT})
@@ -1272,7 +1274,7 @@ class INCIScraper:
                             current_url,
                             next_host,
                         )
-                        self._host_failover[canonical_host] = next_host
+                        used_failover_host = True
                         current_url = replacement
                         time.sleep(delay)
                         delay *= 2
@@ -1280,6 +1282,14 @@ class INCIScraper:
 
                 if attempt == attempts:
                     LOGGER.error("Failed to download %s: %s", current_url, exc)
+                    if (
+                        canonical_host
+                        and used_failover_host
+                        and self._host_failover.get(canonical_host)
+                    ):
+                        attempted_host = parse.urlsplit(current_url).hostname
+                        if attempted_host and attempted_host != canonical_host:
+                            self._host_failover.pop(canonical_host, None)
                     return None
                 LOGGER.warning(
                     "Attempt %s to download %s failed (%s) – retrying",
