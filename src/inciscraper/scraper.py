@@ -423,7 +423,7 @@ class INCIScraper:
         columns = [row["name"] for row in cursor.fetchall()]
         if column not in columns:
             self.conn.execute(
-                f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                f'ALTER TABLE "{table}" ADD COLUMN "{column}" {definition}'
             )
             self.conn.commit()
 
