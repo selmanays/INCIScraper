@@ -1,87 +1,138 @@
 # INCIScraper
 
-Bu proje [INCIDecoder](https://incidecoder.com) sitesinden marka, ürün ve
-bileşen verilerini toplamayı amaçlayan bağımsız bir kazıyıcı içerir. HTML
-çözümlemeleri dahili olarak sağlanan hafif bir ayrıştırıcı ile yapılırken görsel
-işleme için `Pillow` kütüphanesinden yararlanılır.
+INCIScraper, [INCIDecoder](https://incidecoder.com) üzerindeki marka, ürün ve
+bileşen verilerini toplamak için tasarlanmış uçtan uca bir komut satırı
+toolkit'idir. Uygulama; esnek bir HTML ayrıştırıcısı, kesintiye dayanıklı bir
+pipeline ve hız/etik dengesi gözeten ağ katmanıyla tamamlanmış tam özellikli bir
+scraper sunar.
+
+## Öne Çıkan Özellikler
+
+- **Üç aşamalı pipeline:** Markaları listeleyip kaydeder, her marka için ürün
+  sayfalarını dolaşır ve ürün detaylarını (tanım, bileşen listeleri, görseller,
+  hashtag öne çıkarmaları vb.) veri tabanına işler.
+- **Kaldığı yerden devam etme:** Çalışma durumu `metadata` tablosunda saklandığı
+  için kesilen oturumlar marka, ürün ve ürün detayı adımlarında otomatik olarak
+  kaldığı yerden devam eder.【F:src/inciscraper/scraper.py†L186-L259】【F:src/inciscraper/scraper.py†L309-L392】
+- **Dayanıklı veritabanı şeması:** Scraper açılışta gerekli tabloları oluşturur,
+  eksik sütunları ekler ve beklenmeyen yapıları temizleyerek veri tutarlılığı
+  sağlar.【F:src/inciscraper/scraper.py†L418-L509】
+- **Bağımlılık dostu HTML ayrıştırıcı:** `html.parser` üzerine kurulu özel DOM
+  katmanı BeautifulSoup benzeri bir API sunarak ek bağımlılıklara gerek
+  bırakmaz.【F:src/inciscraper/parser.py†L1-L159】【F:src/inciscraper/parser.py†L321-L414】
+- **Ağ hatası toleransı:** DNS sorunlarında alternatif alan adlarına geçer,
+  DNS-over-HTTPS ile IP çözer ve gerekirse doğrudan IP üzerinden TLS bağlantısı
+  kurar.【F:src/inciscraper/scraper.py†L621-L808】【F:src/inciscraper/scraper.py†L862-L1103】
+- **Görsel optimizasyonu:** Ürün görselleri indirilip WebP (mümkünse lossless)
+  olarak sıkıştırılır; Pillow bulunamazsa orijinal veri saklanır.【F:src/inciscraper/scraper.py†L1126-L1230】
+
+## Gereksinimler
+
+- Python 3.11 veya üzeri
+- (Opsiyonel) Görsel sıkıştırma için [`Pillow`](https://python-pillow.org/).
+  Kurulmaması durumunda scraper görselleri orijinal biçimleriyle kaydeder.
+- Dış ağ erişimi (gerçek veri toplamak için gereklidir).
 
 ## Kurulum
 
-1. Python 3.11 veya üzeri bir sürüm kullanın.
-2. Depoyu klonladıktan sonra sanal bir ortam oluşturmanız tavsiye edilir (zorunlu
-   değildir).
-3. Görsel sıkıştırma için kullanılan `Pillow` bağımlılığını kurmak üzere aşağıdaki
-   komutu çalıştırın:
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install Pillow  # Opsiyonel fakat tavsiye edilir
+```
 
-   ```bash
-   pip install Pillow
-   ```
+Projeyi paket olarak kullanmak için depo kökünde şu komutu çalıştırabilirsiniz:
 
-## Kullanım
+```bash
+pip install -e .
+```
 
-Komut satırı arayüzü `main.py` dosyasında bulunur. Varsayılan davranış, tüm
-pipeline adımlarını (markalar → ürünler → ürün detayları) sırasıyla
-çalıştırmaktır. Uygulama başlarken veritabanındaki mevcut durumu özetleyen bir
-“iş yükü” raporu yazar ve daha önce tamamlanmış aşamaları otomatik olarak
-atlar; bu sayede kısa süreli oturumlarda (örneğin iki dakikalık terminal
-limitleri) işlem yarıda kalsa bile komutu yeniden çalıştırarak kaldığınız
-yerden devam edebilirsiniz.
+## Hızlı Başlangıç
+
+Varsayılan davranış tüm pipeline'ı sırayla yürütür. Komut satırı arabirimi
+`main.py` dosyasında yer alır ve `inciscraper.INCIScraper` sınıfını kullanır.
 
 ```bash
 python main.py
 ```
 
-Belirli adımları çalıştırmak için `--step` parametresini kullanabilirsiniz:
+Scraper başlarken veritabanındaki durumu özetler, ardından eksik adımları
+çalıştırır ve sonunda bağlantıyı kapatır.【F:main.py†L63-L118】
 
-```bash
-# Yalnızca marka listelerini topla
-python main.py --step brands
+## Komut Satırı Parametreleri
 
-# Önceden kaydedilmiş markalar için ürün listelerini güncelle
-python main.py --step products
+| Parametre | Açıklama |
+| --- | --- |
+| `--db PATH` | Kullanılacak SQLite dosyasının yolu (varsayılan `incidecoder.db`). |
+| `--images-dir DIR` | Görsellerin kaydedileceği dizin (varsayılan `images`). |
+| `--base-url URL` | Gerekirse farklı bir INCIDecoder tabanı kullanın. |
+| `--alternate-base-url URL` | DNS hatalarında denenecek ek taban URL'ler; birden fazla kez verilebilir. |
+| `--step {all,brands,products,details}` | Pipeline'ın belirli bir bölümünü çalıştırır. |
+| `--max-pages N` | Marka listelemede çekilecek sayfa sayısını sınırlar. |
+| `--resume/--no-resume` | `all` adımı çalışırken tamamlanmış aşamaları atlayıp atlamayacağını belirler. |
+| `--log-level LEVEL` | Günlük çıktısının ayrıntı düzeyini ayarlar. |
 
-# Ürün detaylarını (açıklama, içerikler, görseller vb.) güncelle
-python main.py --step details
+Negatif veya sıfır `--max-pages` değerleri kabul edilmez; CLI uygun hatayı
+verir.【F:main.py†L55-L69】
+
+## Veritabanı Yapısı
+
+Scraper aşağıdaki tabloları oluşturur ve kontrol eder:
+
+- **brands** – Marka adı, özgün URL ve ürünlerinin işlenip işlenmediğini
+  gösteren bayrak.
+- **products** – Marka ilişkisi, ürün adı, açıklama, görsel yolu, öne çıkan
+  içerik fonksiyonları ve detayların tamamlanıp tamamlanmadığı.
+- **ingredients** – Bileşenin derecelendirmesi, "başka adları", resmi COSING
+  bilgileri ve detay bölümünün HTML içeriği dahil kapsamlı metrikler.
+- **product_ingredients** – Ürün ile bileşenler arasındaki çoktan çoğa ilişki ve
+  tooltip metinleri.
+- **metadata** – Kaldığı yerden devam edebilmek için kullanılan yardımcı
+  anahtar/değer deposu.
+
+Schema ve kolonlar uygulama tarafından doğrulanır; beklenmeyen tablo veya
+sütunlar tespit edilirse kaldırılır.【F:src/inciscraper/scraper.py†L418-L509】
+
+## Nasıl Çalışır?
+
+1. **Markalar:** `/brands` sayfalarındaki bağlantıları tarar, marka adlarını ve
+   URL'lerini kaydeder. Sayfa sayısı bilinmiyorsa metadata kayıtları ile takip
+   edilir.【F:src/inciscraper/scraper.py†L219-L309】【F:src/inciscraper/scraper.py†L512-L601】
+2. **Ürünler:** Her marka için paginasyonlu ürün listelerini dolaşır, hata
+   durumlarında alternatif URL denemeleri yapar ve yeni ürünleri ekler veya
+   isimleri günceller.【F:src/inciscraper/scraper.py†L262-L392】【F:src/inciscraper/scraper.py†L602-L685】
+3. **Ürün Detayları:** Ürün sayfalarını indirir, bileşen listelerini, fonksiyon
+   tablolarını, hashtag öne çıkanlarını ve varsa "discontinued" uyarılarını
+   ayrıştırır; ardından görselleri indirip optimize eder.【F:src/inciscraper/scraper.py†L392-L417】【F:src/inciscraper/scraper.py†L685-L1125】
+4. **Bileşen Detayları:** Ürünlerde görülen her bileşenin kendi sayfasını
+   ziyaret eder, derecelendirme bilgilerini ve COSING bölümünü çıkarır, ilgili
+   bağlantıları normalize eder.【F:src/inciscraper/scraper.py†L996-L1099】
+
+Bu adımların tümü idempotent olduğundan scraper'ı tekrar çalıştırmak veri
+tekrarı oluşturmaz.
+
+## Proje Yapısı
+
+```
+INCIScraper/
+├── main.py                # Komut satırı arayüzü
+├── README.md              # Bu dosya
+└── src/inciscraper/
+    ├── __init__.py        # Paket giriş noktası
+    ├── parser.py          # Özel HTML parser & yardımcılar
+    └── scraper.py         # Scraper iş mantığı ve veri katmanı
 ```
 
-Diğer yararlı parametreler:
+## Geliştirme İpuçları
 
-- `--db`: Kullanılacak SQLite veritabanının yolu (varsayılan: `incidecoder.db`).
-- `--images-dir`: İndirilen ürün görsellerinin kaydedileceği dizin (varsayılan:
-  `images`). Her ürünün görselleri ürün kimliğini taşıyan ayrı bir klasörde
-  saklanır ve görseller kaydedilirken kalite bozulmadan mümkün olan en iyi
-  sıkıştırma uygulanır.
-- `--base-url`: Gerekirse INCIDecoder için alternatif bir kök URL tanımlar
-  (örneğin yerel testler için).
-- `--alternate-base-url`: Birincil alan adının DNS çözümü başarısız olduğunda
-  otomatik olarak denenecek ek kök URL'ler tanımlar. Birden fazla kez
-  kullanılabilir.
-- `--max-pages`: Marka listesi toplama adımında indirilecek sayfa sayısını sınırlar.
-- `--resume/--no-resume`: Tüm pipeline'ı çalıştırırken tamamlanmış adımları
-  atlayıp atlamama davranışını belirler (varsayılan: `--resume`).
-- `--log-level`: Günlük seviyesini değiştirir (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`).
+- Scraper sürekli log yazar; `--log-level DEBUG` ile ayrıntıları görebilirsiniz.
+- Ürün veya marka ayrıştırmasında değişiklik yaparken gerçek HTML'yi kaydedip
+  `parse_html` fonksiyonuna vererek hızlıca manuel testler yapabilirsiniz.
+- Ağa erişimin olmadığı durumlarda sahte HTML yanıtları dönen bir test sunucusu
+  kurarak scraper'ı doğrulayabilirsiniz.
 
-## Veritabanı Şeması
+## Lisans
 
-Scraper aşağıdaki tabloları oluşturur:
-
-- **brands** – Marka isimleri ve URL bilgileri.
-- **products** – Ürün isimleri, marka ilişkisi, açıklamalar, görsel yolu ve
-  ürün seviyesindeki özet bilgiler.
-- **ingredients** – Her bir bileşenin detay sayfasından toplanan veriler.
-- **product_ingredients** – Ürünler ile bileşenler arasındaki çoktan çoğa ilişki
-  ve varsa kısa açıklama/tooltip içerikleri.
-
-Tüm tablolar `UNIQUE` kısıtları ve durum bayrakları (`products_scraped`,
-`details_scraped`) sayesinde tekrar çalıştırmalara dayanıklıdır. Scraper her
-başlatıldığında veritabanı şemasını doğrular; beklenmeyen tablo veya sütunlar
-tespit edilirse otomatik olarak kaldırılır.
-
-## Notlar
-
-- Uygulama ağ trafiği sırasında nazik olmak için her HTTP isteği arasında kısa
-  bir gecikme ekler.
-- Çalışma ortamınızda dış ağ erişimi yoksa scraper gerçek verileri toplayamaz;
-  bu durumda kodun incelenmesi veya sahte HTML ile test edilmesi gerekir.
-- INCIDecoder sayfalarındaki içerik yapısı değişirse ilgili ayrıştırma
-  fonksiyonlarının güncellenmesi gerekebilir.
+Bu depo eğitim amaçlıdır; gerçek dünya kullanımında INCIDecoder'ın kullanım
+koşullarını ve robots.txt dosyasını dikkate alınız.
