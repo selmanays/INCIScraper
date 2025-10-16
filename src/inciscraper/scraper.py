@@ -130,8 +130,14 @@ class INCIScraper:
         LOGGER.info("Starting product detail collection")
         self.scrape_product_details()
 
-    def scrape_brands(self) -> None:
-        offset = 1
+    def scrape_brands(self, *, reset_offset: bool = False) -> None:
+        if reset_offset:
+            self._set_metadata("brands_next_offset", "1")
+        start_offset = int(self._get_metadata("brands_next_offset", "1"))
+        if start_offset > 1:
+            LOGGER.info("Resuming brand collection from offset %s", start_offset)
+        self._set_metadata("brands_complete", "0")
+        offset = start_offset
         while True:
             page_url = f"{self.base_url}/brands?offset={offset}"
             LOGGER.info("Fetching brand page %s", page_url)
@@ -142,12 +148,15 @@ class INCIScraper:
             brands = self._parse_brand_list(html)
             if not brands:
                 LOGGER.info("No brands found on page %s – stopping", page_url)
+                self._set_metadata("brands_complete", "1")
+                self._set_metadata("brands_next_offset", "1")
                 break
             new_entries = 0
             for name, url in brands:
                 new_entries += self._insert_brand(name, url)
             LOGGER.info("Stored %s brands from %s", new_entries, page_url)
             self.conn.commit()
+            self._set_metadata("brands_next_offset", str(offset + 1))
             offset += 1
             time.sleep(REQUEST_SLEEP)
 
@@ -251,9 +260,56 @@ class INCIScraper:
                 tooltip_ingredient_link TEXT,
                 PRIMARY KEY (product_id, ingredient_id)
             );
+
+            CREATE TABLE IF NOT EXISTS metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            );
             """
         )
         self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Metadata helpers
+    # ------------------------------------------------------------------
+    def _get_metadata(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        cursor = self.conn.execute("SELECT value FROM metadata WHERE key = ?", (key,))
+        row = cursor.fetchone()
+        if row is None:
+            return default
+        return row["value"]
+
+    def _set_metadata(self, key: str, value: str) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO metadata (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            (key, value),
+        )
+        self.conn.commit()
+
+    def _delete_metadata(self, key: str) -> None:
+        self.conn.execute("DELETE FROM metadata WHERE key = ?", (key,))
+        self.conn.commit()
+
+    # ------------------------------------------------------------------
+    # Workload inspection helpers
+    # ------------------------------------------------------------------
+    def has_brand_work(self) -> bool:
+        return self._get_metadata("brands_complete") != "1"
+
+    def has_product_work(self) -> bool:
+        cursor = self.conn.execute(
+            "SELECT 1 FROM brands WHERE products_scraped = 0 LIMIT 1"
+        )
+        return cursor.fetchone() is not None
+
+    def has_product_detail_work(self) -> bool:
+        cursor = self.conn.execute(
+            "SELECT 1 FROM products WHERE details_scraped = 0 LIMIT 1"
+        )
+        return cursor.fetchone() is not None
 
     # ------------------------------------------------------------------
     # Brand scraping helpers
