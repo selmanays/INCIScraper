@@ -25,10 +25,17 @@ import os
 import re
 import sqlite3
 import time
+from io import BytesIO
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 from urllib import error, parse, request
+
+try:
+    from PIL import Image, ImageFile
+except ModuleNotFoundError:  # pragma: no cover - optional dependency safeguard
+    Image = None  # type: ignore[assignment]
+    ImageFile = None  # type: ignore[assignment]
 
 from .parser import Node, extract_text, parse_html
 
@@ -1189,10 +1196,66 @@ class INCIScraper:
         if data is None:
             return None
         suffix = self._guess_extension(image_url)
-        filename = f"{product_id}_{self._slugify(product_name)}{suffix}"
-        path = self.image_dir / filename
-        path.write_bytes(data)
+        optimized_data, suffix = self._compress_image(data, suffix)
+        product_dir = self.image_dir / str(product_id)
+        product_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{self._slugify(product_name)}{suffix}"
+        path = product_dir / filename
+        path.write_bytes(optimized_data)
         return str(path)
+
+    def _compress_image(self, data: bytes, original_suffix: str) -> Tuple[bytes, str]:
+        if Image is None:
+            return data, original_suffix
+
+        if ImageFile is not None:
+            ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+        try:
+            with Image.open(BytesIO(data)) as image:
+                image.load()
+
+                # Normalise palette images to avoid surprises during conversion.
+                if image.mode == "P":
+                    if "transparency" in image.info:
+                        image = image.convert("RGBA")
+                    else:
+                        image = image.convert("RGB")
+
+                # Attempt a lossless WebP compression first.
+                buffer = BytesIO()
+                try:
+                    save_kwargs = {"format": "WEBP", "lossless": True, "method": 6}
+                    if image.mode not in {"RGB", "RGBA", "L", "LA"}:
+                        image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+                    image.save(buffer, **save_kwargs)
+                    return buffer.getvalue(), ".webp"
+                except (OSError, ValueError):
+                    # Fall back to the original format with the best optimisation Pillow offers.
+                    buffer = BytesIO()
+                    target_format = image.format or self._extension_to_format(original_suffix)
+                    save_kwargs = {"optimize": True}
+                    if target_format == "JPEG":
+                        save_kwargs.update({"quality": 95, "progressive": True})
+                    image.save(buffer, format=target_format, **save_kwargs)
+                    return buffer.getvalue(), f".{target_format.lower()}"
+        except OSError:
+            LOGGER.warning("Failed to process product image, storing original bytes", exc_info=True)
+            return data, original_suffix
+
+        return data, original_suffix
+
+    def _extension_to_format(self, suffix: str) -> str:
+        suffix = suffix.lower().lstrip(".")
+        if suffix in {"jpg", "jpeg"}:
+            return "JPEG"
+        if suffix == "png":
+            return "PNG"
+        if suffix == "gif":
+            return "GIF"
+        if suffix == "webp":
+            return "WEBP"
+        return "PNG"
 
     def _guess_extension(self, url: str) -> str:
         parsed = parse.urlparse(url)
