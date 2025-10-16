@@ -147,6 +147,7 @@ class INCIScraper:
             for name, url in brands:
                 new_entries += self._insert_brand(name, url)
             LOGGER.info("Stored %s brands from %s", new_entries, page_url)
+            self.conn.commit()
             offset += 1
             time.sleep(REQUEST_SLEEP)
 
