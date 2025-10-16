@@ -16,7 +16,10 @@ sağlanan hafif bir ayrıştırıcı ile yapılır.
 
 Komut satırı arayüzü `main.py` dosyasında bulunur. Varsayılan davranış, tüm
 pipeline adımlarını (markalar → ürünler → ürün detayları) sırasıyla
-çalıştırmaktır.
+çalıştırmaktır. CLI daha önce tamamlanmış aşamaları otomatik olarak atlar; bu
+sayede kısa süreli oturumlarda (örneğin iki dakikalık terminal limitleri) işlem
+yarıda kalsa bile komutu yeniden çalıştırarak kaldığınız yerden devam
+edebilirsiniz.
 
 ```bash
 python main.py
@@ -39,6 +42,8 @@ Diğer yararlı parametreler:
 
 - `--db`: Kullanılacak SQLite veritabanının yolu (varsayılan: `incidecoder.db`).
 - `--images-dir`: İndirilen ürün görsellerinin kaydedileceği dizin (varsayılan: `images`).
+- `--resume/--no-resume`: Tüm pipeline'ı çalıştırırken tamamlanmış adımları
+  atlayıp atlamama davranışını belirler (varsayılan: `--resume`).
 - `--log-level`: Günlük seviyesini değiştirir (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`).
 
 ## Veritabanı Şeması

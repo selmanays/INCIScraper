@@ -35,6 +35,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run only a specific pipeline step",
     )
     parser.add_argument(
+        "--resume/--no-resume",
+        dest="resume",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="Skip completed steps when running the full pipeline",
+    )
+    parser.add_argument(
         "--log-level",
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
@@ -57,11 +64,24 @@ def main(argv: list[str] | None = None) -> int:
     scraper = INCIScraper(db_path=args.db, image_dir=args.images_dir, base_url=args.base_url)
     try:
         if args.step in {"all", "brands"}:
-            scraper.scrape_brands()
+            if args.step == "brands" or not args.resume or scraper.has_brand_work():
+                scraper.scrape_brands(reset_offset=not args.resume)
+            else:
+                logging.info("Skipping brand collection – already complete")
         if args.step in {"all", "products"}:
-            scraper.scrape_products()
+            if args.step == "products" or not args.resume or scraper.has_product_work():
+                scraper.scrape_products()
+            else:
+                logging.info("Skipping product collection – nothing left to do")
         if args.step in {"all", "details"}:
-            scraper.scrape_product_details()
+            if (
+                args.step == "details"
+                or not args.resume
+                or scraper.has_product_detail_work()
+            ):
+                scraper.scrape_product_details()
+            else:
+                logging.info("Skipping product detail collection – nothing left to do")
     finally:
         scraper.close()
     return 0
