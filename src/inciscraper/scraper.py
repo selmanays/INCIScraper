@@ -80,6 +80,8 @@ class ProductDetails:
     ingredients: List[IngredientReference]
     ingredient_functions: List[IngredientFunction]
     highlights: ProductHighlights
+    discontinued: bool
+    replacement_product_url: Optional[str]
 
 
 @dataclass
@@ -346,6 +348,8 @@ class INCIScraper:
                 image_path TEXT,
                 ingredient_functions_json TEXT,
                 highlights_json TEXT,
+                discontinued INTEGER NOT NULL DEFAULT 0,
+                replacement_product_url TEXT,
                 details_scraped INTEGER NOT NULL DEFAULT 0
             );
 
@@ -387,6 +391,8 @@ class INCIScraper:
             """
         )
         self.conn.commit()
+        self._ensure_column("products", "discontinued", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("products", "replacement_product_url", "TEXT")
 
     # ------------------------------------------------------------------
     # Metadata helpers
@@ -411,6 +417,13 @@ class INCIScraper:
     def _delete_metadata(self, key: str) -> None:
         self.conn.execute("DELETE FROM metadata WHERE key = ?", (key,))
         self.conn.commit()
+
+    def _ensure_column(self, table: str, column: str, definition: str) -> None:
+        cursor = self.conn.execute(f"PRAGMA table_info({table})")
+        columns = [row["name"] for row in cursor.fetchall()]
+        if column not in columns:
+            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+            self.conn.commit()
 
     # ------------------------------------------------------------------
     # Workload inspection helpers
@@ -633,6 +646,19 @@ class INCIScraper:
         ingredients = self._extract_ingredients(product_block, tooltip_map)
         ingredient_functions = self._extract_ingredient_functions(root)
         highlights = self._extract_highlights(root)
+        discontinued = False
+        replacement_url = None
+        alert_node = root.find(class_="topalert")
+        if alert_node:
+            alert_text = extract_text(alert_node).lower()
+            if "discontinued" in alert_text:
+                discontinued = True
+                replacement_anchor = alert_node.find(
+                    tag="a",
+                    predicate=lambda n: n.get("href", "").startswith("/products/"),
+                )
+                if replacement_anchor and replacement_anchor.get("href"):
+                    replacement_url = self._absolute_url(replacement_anchor.get("href"))
         return ProductDetails(
             name=name,
             description=description,
@@ -640,6 +666,8 @@ class INCIScraper:
             ingredients=ingredients,
             ingredient_functions=ingredient_functions,
             highlights=highlights,
+            discontinued=discontinued,
+            replacement_product_url=replacement_url,
         )
 
     def _extract_product_image(self, product_block: Node) -> Optional[str]:
@@ -819,7 +847,8 @@ class INCIScraper:
             """
             UPDATE products
             SET name = ?, description = ?, image_path = ?,
-                ingredient_functions_json = ?, highlights_json = ?
+                ingredient_functions_json = ?, highlights_json = ?,
+                discontinued = ?, replacement_product_url = ?
             WHERE id = ?
             """,
             (
@@ -862,6 +891,8 @@ class INCIScraper:
                     },
                     ensure_ascii=False,
                 ),
+                1 if details.discontinued else 0,
+                details.replacement_product_url,
                 product_id,
             ),
         )
