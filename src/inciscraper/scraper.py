@@ -1388,16 +1388,12 @@ class INCIScraper:
         )
         query_params = parse.urlencode({"name": hostname, "type": "A"})
         doh_url = f"{resolver_endpoint}?{query_params}"
-        req = request.Request(doh_url, headers={"User-Agent": USER_AGENT})
-        try:
-            with request.urlopen(req, timeout=self.timeout) as response:
-                payload = json.loads(response.read().decode("utf-8"))
-        except Exception:
+        payload = self._download_doh_payload(doh_url)
+        if payload is None:
             LOGGER.warning(
                 "Failed to resolve %s via DNS-over-HTTPS endpoint %s",
                 hostname,
                 resolver_endpoint,
-                exc_info=True,
             )
             return None
 
@@ -1411,6 +1407,86 @@ class INCIScraper:
                 if ip_address:
                     return ip_address
         return None
+
+    def _download_doh_payload(self, doh_url: str) -> Optional[Dict[str, object]]:
+        req = request.Request(
+            doh_url,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "application/dns-json",
+            },
+        )
+        try:
+            with request.urlopen(req, timeout=self.timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except error.URLError as exc:
+            root_cause = getattr(exc, "reason", None)
+            if isinstance(root_cause, socket.gaierror):
+                payload = self._download_doh_payload_via_ip(doh_url)
+                if payload is not None:
+                    return payload
+            LOGGER.debug("Standard DNS lookup for DoH endpoint failed: %s", exc, exc_info=True)
+        except Exception:
+            LOGGER.debug("Unexpected error querying DoH endpoint", exc_info=True)
+        return None
+
+    def _download_doh_payload_via_ip(
+        self, doh_url: str
+    ) -> Optional[Dict[str, object]]:
+        parsed = parse.urlsplit(doh_url)
+        hostname = parsed.hostname
+        if not hostname:
+            return None
+        ip_address = self._doh_ip_override().get(hostname)
+        if not ip_address:
+            return None
+
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+
+        connection = _DirectHTTPSConnection(
+            ip_address,
+            server_hostname=hostname,
+            timeout=self.timeout,
+            context=self._ssl_context,
+        )
+        try:
+            headers = {
+                "Host": hostname,
+                "User-Agent": USER_AGENT,
+                "Accept": "application/dns-json",
+                "Connection": "close",
+            }
+            connection.request("GET", path, headers=headers)
+            response = connection.getresponse()
+            if 200 <= response.status < 300:
+                return json.loads(response.read().decode("utf-8"))
+            LOGGER.debug(
+                "Direct IP DoH request to %s for %s returned HTTP %s",
+                ip_address,
+                hostname,
+                response.status,
+            )
+        except (OSError, http.client.HTTPException, json.JSONDecodeError):
+            LOGGER.debug(
+                "Direct IP DoH request to %s for %s failed",
+                ip_address,
+                hostname,
+                exc_info=True,
+            )
+        finally:
+            connection.close()
+
+        return None
+
+    @staticmethod
+    def _doh_ip_override() -> Dict[str, str]:
+        return {
+            "dns.google": "8.8.8.8",
+            "dns.google.com": "8.8.8.8",
+            "cloudflare-dns.com": "1.1.1.1",
+        }
 
     def _build_host_alternatives(
         self, base_url: str, alternate_base_urls: Iterable[str]
