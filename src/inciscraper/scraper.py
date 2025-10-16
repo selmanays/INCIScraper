@@ -422,7 +422,9 @@ class INCIScraper:
         cursor = self.conn.execute(f"PRAGMA table_info({table})")
         columns = [row["name"] for row in cursor.fetchall()]
         if column not in columns:
-            self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+            self.conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+            )
             self.conn.commit()
 
     # ------------------------------------------------------------------
