@@ -63,6 +63,22 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(args.log_level)
     scraper = INCIScraper(db_path=args.db, image_dir=args.images_dir, base_url=args.base_url)
     try:
+        summary = scraper.get_workload_summary()
+        brand_pages_remaining = summary["brand_pages_remaining"]
+        brand_pages_text = (
+            str(brand_pages_remaining) if brand_pages_remaining is not None else "unknown"
+        )
+        logging.info(
+            "Initial workload – brand pages remaining: %s, brands pending products: %s, products pending details: %s",
+            brand_pages_text,
+            summary["brands_pending_products"],
+            summary["products_pending_details"],
+        )
+        logging.info(
+            "Database snapshot – stored brands: %s, stored products: %s",
+            summary["brands_total"],
+            summary["products_total"],
+        )
         if args.step in {"all", "brands"}:
             if args.step == "brands" or not args.resume or scraper.has_brand_work():
                 scraper.scrape_brands(reset_offset=not args.resume)
