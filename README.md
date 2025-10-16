@@ -42,6 +42,7 @@ Diğer yararlı parametreler:
 
 - `--db`: Kullanılacak SQLite veritabanının yolu (varsayılan: `incidecoder.db`).
 - `--images-dir`: İndirilen ürün görsellerinin kaydedileceği dizin (varsayılan: `images`).
+- `--max-pages`: Marka listesi toplama adımında indirilecek sayfa sayısını sınırlar.
 - `--resume/--no-resume`: Tüm pipeline'ı çalıştırırken tamamlanmış adımları
   atlayıp atlamama davranışını belirler (varsayılan: `--resume`).
 - `--log-level`: Günlük seviyesini değiştirir (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`).
