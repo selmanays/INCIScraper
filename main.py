@@ -75,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     configure_logging(args.log_level)
     scraper = INCIScraper(db_path=args.db, image_dir=args.images_dir, base_url=args.base_url)
     try:
+        scraper.resume_incomplete_metadata()
         summary = scraper.get_workload_summary()
         brand_pages_remaining = summary["brand_pages_remaining"]
         brand_pages_text = (

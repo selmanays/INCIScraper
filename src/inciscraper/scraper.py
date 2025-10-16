@@ -178,6 +178,32 @@ class INCIScraper:
         LOGGER.info("Starting product detail collection")
         self.scrape_product_details()
 
+    def resume_incomplete_metadata(self) -> None:
+        """Complete any partial work recorded in the metadata table."""
+
+        resumed_anything = False
+
+        if self._metadata_has_incomplete_brands():
+            LOGGER.info(
+                "Metadata indicates interrupted brand collection – resuming before continuing",
+            )
+            self.scrape_brands()
+            resumed_anything = True
+
+        pending_product_resumes = self._count_metadata_with_prefix(
+            "brand_products_next_offset:"
+        )
+        if pending_product_resumes:
+            LOGGER.info(
+                "Metadata indicates interrupted product collection for %s brand(s) – resuming before continuing",
+                pending_product_resumes,
+            )
+            self.scrape_products()
+            resumed_anything = True
+
+        if resumed_anything:
+            LOGGER.info("Metadata recovery completed")
+
     def scrape_brands(
         self,
         *,
@@ -456,6 +482,22 @@ class INCIScraper:
     def _delete_metadata(self, key: str) -> None:
         self.conn.execute("DELETE FROM metadata WHERE key = ?", (key,))
         self.conn.commit()
+
+    def _count_metadata_with_prefix(self, prefix: str) -> int:
+        cursor = self.conn.execute(
+            "SELECT COUNT(*) AS total FROM metadata WHERE key LIKE ?",
+            (f"{prefix}%",),
+        )
+        row = cursor.fetchone()
+        return int(row["total"]) if row else 0
+
+    def _metadata_has_incomplete_brands(self) -> bool:
+        if self._get_metadata("brands_complete") == "0":
+            return True
+        next_offset = self._get_metadata("brands_next_offset")
+        if next_offset and next_offset not in {"", "1"}:
+            return True
+        return False
 
     def _ensure_column(self, table: str, column: str, definition: str) -> None:
         cursor = self.conn.execute(f"PRAGMA table_info({table})")
