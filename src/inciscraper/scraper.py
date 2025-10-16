@@ -167,15 +167,39 @@ class INCIScraper:
         for brand in cursor.fetchall():
             brand_id = brand["id"]
             brand_url = brand["url"]
+            resume_key = f"brand_products_next_offset:{brand_id}"
+            start_offset = int(self._get_metadata(resume_key, "1"))
+            if start_offset > 1:
+                LOGGER.info(
+                    "Resuming product collection for brand %s from offset %s",
+                    brand["name"],
+                    start_offset,
+                )
             LOGGER.info("Collecting products for brand %s (%s)", brand["name"], brand_url)
-            products_found = self._collect_products_for_brand(brand_id, brand_url)
-            self.conn.execute(
-                "UPDATE brands SET products_scraped = 1 WHERE id = ?",
-                (brand_id,),
+            products_found, completed, next_offset = self._collect_products_for_brand(
+                brand_id, brand_url, start_offset=start_offset
             )
             self.conn.commit()
+            if completed:
+                self.conn.execute(
+                    "UPDATE brands SET products_scraped = 1 WHERE id = ?",
+                    (brand_id,),
+                )
+                self.conn.commit()
+                self._delete_metadata(resume_key)
+            else:
+                self._set_metadata(resume_key, str(next_offset))
+                LOGGER.info(
+                    "Product collection for brand %s interrupted – will retry from offset %s",
+                    brand["name"],
+                    next_offset,
+                )
+            status = "complete" if completed else "incomplete"
             LOGGER.info(
-                "Finished brand %s – %s products recorded", brand["name"], products_found
+                "Finished brand %s – %s products recorded (%s)",
+                brand["name"],
+                products_found,
+                status,
             )
 
     def scrape_product_details(self) -> None:
@@ -351,8 +375,10 @@ class INCIScraper:
             return 0
         return 1
 
-    def _collect_products_for_brand(self, brand_id: int, brand_url: str) -> int:
-        offset = 1
+    def _collect_products_for_brand(
+        self, brand_id: int, brand_url: str, *, start_offset: int = 1
+    ) -> Tuple[int, bool, int]:
+        offset = start_offset
         total = 0
         while True:
             page_url = self._append_offset(brand_url, offset)
@@ -360,16 +386,15 @@ class INCIScraper:
             html = self._fetch_html(page_url)
             if html is None:
                 LOGGER.warning("Unable to download product listing %s", page_url)
-                break
+                return total, False, offset
             products = self._parse_product_list(html)
             if not products:
                 LOGGER.debug("No more products found on %s", page_url)
-                break
+                return total, True, offset
             for name, url in products:
                 total += self._insert_product(brand_id, name, url)
             offset += 1
             time.sleep(REQUEST_SLEEP)
-        return total
 
     def _parse_product_list(self, html: str) -> List[Tuple[str, str]]:
         root = parse_html(html)
