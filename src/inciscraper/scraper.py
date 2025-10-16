@@ -19,12 +19,14 @@ resumed safely.
 """
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import os
 import re
 import socket
 import sqlite3
+import ssl
 import time
 from io import BytesIO
 from dataclasses import dataclass
@@ -167,9 +169,11 @@ class INCIScraper:
         self.conn.row_factory = sqlite3.Row
         self._init_db()
         self._host_failover: Dict[str, str] = {}
+        self._host_ip_overrides: Dict[str, str] = {}
         self._host_alternatives = self._build_host_alternatives(
             self.base_url, alternate_base_urls or []
         )
+        self._ssl_context = ssl.create_default_context()
 
     # ------------------------------------------------------------------
     # Public API
@@ -1247,6 +1251,11 @@ class INCIScraper:
         alternative_hosts = list(self._host_alternatives.get(canonical_host or "", []))
         alt_index = 0
 
+        if canonical_host and canonical_host in self._host_ip_overrides:
+            data = self._fetch_via_direct_ip(original_parts, self._host_ip_overrides[canonical_host])
+            if data is not None:
+                return data
+
         for attempt in range(1, attempts + 1):
             LOGGER.debug("Downloading %s (attempt %s/%s)", current_url, attempt, attempts)
             req = request.Request(current_url, headers={"User-Agent": USER_AGENT})
@@ -1285,6 +1294,19 @@ class INCIScraper:
                         delay *= 2
                         continue
 
+                if canonical_host and isinstance(root_cause, socket.gaierror):
+                    resolved_ip = self._resolve_host_via_doh(canonical_host)
+                    if resolved_ip:
+                        LOGGER.warning(
+                            "DNS resolution failed for %s – attempting direct IP connection via %s",
+                            canonical_host,
+                            resolved_ip,
+                        )
+                        data = self._fetch_via_direct_ip(original_parts, resolved_ip)
+                        if data is not None:
+                            self._host_ip_overrides[canonical_host] = resolved_ip
+                            return data
+
                 if attempt == attempts:
                     LOGGER.error("Failed to download %s: %s", current_url, exc)
                     return None
@@ -1300,6 +1322,55 @@ class INCIScraper:
 
         return None
 
+    def _fetch_via_direct_ip(
+        self, parts: parse.SplitResult, ip_address: str
+    ) -> Optional[bytes]:
+        if parts.scheme != "https":
+            return None
+
+        hostname = parts.hostname
+        if not hostname:
+            return None
+
+        path = parts.path or "/"
+        if parts.query:
+            path = f"{path}?{parts.query}"
+
+        connection = _DirectHTTPSConnection(
+            ip_address,
+            server_hostname=hostname,
+            timeout=self.timeout,
+            context=self._ssl_context,
+        )
+        try:
+            headers = {
+                "Host": hostname,
+                "User-Agent": USER_AGENT,
+                "Accept": "*/*",
+                "Connection": "close",
+            }
+            connection.request("GET", path, headers=headers)
+            response = connection.getresponse()
+            if 200 <= response.status < 300:
+                return response.read()
+            LOGGER.warning(
+                "Direct IP request to %s for %s returned HTTP %s",
+                ip_address,
+                parts.geturl(),
+                response.status,
+            )
+        except (OSError, http.client.HTTPException):
+            LOGGER.warning(
+                "Direct IP request to %s for %s failed",
+                ip_address,
+                parts.geturl(),
+                exc_info=True,
+            )
+        finally:
+            connection.close()
+
+        return None
+
     def _apply_host_override(self, url: str) -> str:
         parts = parse.urlsplit(url)
         host = parts.hostname
@@ -1310,6 +1381,36 @@ class INCIScraper:
             return url
         replacement = self._replace_host(parts, override)
         return replacement or url
+
+    def _resolve_host_via_doh(self, hostname: str) -> Optional[str]:
+        resolver_endpoint = os.environ.get(
+            "INCISCRAPER_DOH_ENDPOINT", "https://dns.google/resolve"
+        )
+        query_params = parse.urlencode({"name": hostname, "type": "A"})
+        doh_url = f"{resolver_endpoint}?{query_params}"
+        req = request.Request(doh_url, headers={"User-Agent": USER_AGENT})
+        try:
+            with request.urlopen(req, timeout=self.timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except Exception:
+            LOGGER.warning(
+                "Failed to resolve %s via DNS-over-HTTPS endpoint %s",
+                hostname,
+                resolver_endpoint,
+                exc_info=True,
+            )
+            return None
+
+        answers = payload.get("Answer")
+        if not answers:
+            return None
+
+        for answer in answers:
+            if answer.get("type") == 1:
+                ip_address = answer.get("data")
+                if ip_address:
+                    return ip_address
+        return None
 
     def _build_host_alternatives(
         self, base_url: str, alternate_base_urls: Iterable[str]
@@ -1454,6 +1555,35 @@ class INCIScraper:
         value = re.sub(r"[^a-z0-9]+", "-", value)
         value = value.strip("-")
         return value or "product"
+
+
+class _DirectHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection that allows overriding the SNI hostname for TLS."""
+
+    def __init__(
+        self,
+        host: str,
+        *,
+        server_hostname: str,
+        timeout: Optional[float],
+        context: ssl.SSLContext,
+    ) -> None:
+        super().__init__(host, timeout=timeout, context=context)
+        self._server_hostname = server_hostname
+
+    def connect(self) -> None:  # pragma: no cover - exercised via network operations
+        conn = socket.create_connection(
+            (self.host, self.port), self.timeout, self.source_address
+        )
+        try:
+            if self._tunnel_host:
+                self.sock = conn
+                self._tunnel()
+                conn = self.sock  # type: ignore[assignment]
+            self.sock = self.context.wrap_socket(conn, server_hostname=self._server_hostname)
+        except Exception:
+            conn.close()
+            raise
 
 
 __all__ = ["INCIScraper"]
