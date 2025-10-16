@@ -215,6 +215,7 @@ class INCIScraper:
             )
 
     def scrape_products(self) -> None:
+        self._retry_incomplete_brand_products()
         cursor = self.conn.execute(
             "SELECT id, name, url FROM brands WHERE products_scraped = 0 ORDER BY id"
         )
@@ -248,6 +249,15 @@ class INCIScraper:
                 )
                 self.conn.commit()
                 self._delete_metadata(resume_key)
+                product_total = self._count_products_for_brand(brand_id)
+                if product_total == 0:
+                    LOGGER.warning(
+                        "Brand %s marked complete but no products recorded – flagging for review",
+                        brand["name"],
+                    )
+                    self._set_metadata(f"brand_empty_products:{brand_id}", "1")
+                else:
+                    self._delete_metadata(f"brand_empty_products:{brand_id}")
             else:
                 self._set_metadata(resume_key, str(next_offset))
                 LOGGER.info(
@@ -491,6 +501,7 @@ class INCIScraper:
     ) -> Tuple[int, bool, int]:
         offset = start_offset
         total = 0
+        fallback_attempted = False
         while True:
             page_url = self._append_offset(brand_url, offset)
             LOGGER.debug("Fetching product listing page %s", page_url)
@@ -499,6 +510,22 @@ class INCIScraper:
                 LOGGER.warning("Unable to download product listing %s", page_url)
                 return total, False, offset
             products = self._parse_product_list(html)
+            if (
+                not products
+                and offset == start_offset == 1
+                and not fallback_attempted
+                and "?offset=" not in brand_url
+            ):
+                LOGGER.debug(
+                    "First attempt for %s returned no products – retrying without offset",
+                    brand_url,
+                )
+                fallback_attempted = True
+                html = self._fetch_html(brand_url)
+                if html is None:
+                    LOGGER.warning("Unable to download fallback product listing %s", brand_url)
+                    return total, False, offset
+                products = self._parse_product_list(html)
             if not products:
                 LOGGER.debug("No more products found on %s", page_url)
                 return total, True, offset
@@ -506,6 +533,42 @@ class INCIScraper:
                 total += self._insert_product(brand_id, name, url)
             offset += 1
             time.sleep(REQUEST_SLEEP)
+
+    def _retry_incomplete_brand_products(self) -> None:
+        cursor = self.conn.execute(
+            """
+            SELECT b.id, b.name
+            FROM brands b
+            LEFT JOIN (
+                SELECT brand_id, COUNT(*) AS product_count
+                FROM products
+                GROUP BY brand_id
+            ) p ON p.brand_id = b.id
+            WHERE b.products_scraped = 1
+              AND IFNULL(p.product_count, 0) = 0
+            ORDER BY b.id
+            """
+        )
+        for row in cursor.fetchall():
+            marker_key = f"brand_empty_products:{row['id']}"
+            if self._get_metadata(marker_key) == "1":
+                continue
+            LOGGER.info(
+                "Brand %s previously marked complete but has no products – scheduling retry",
+                row["name"],
+            )
+            self.conn.execute(
+                "UPDATE brands SET products_scraped = 0 WHERE id = ?",
+                (row["id"],),
+            )
+        self.conn.commit()
+
+    def _count_products_for_brand(self, brand_id: int) -> int:
+        cursor = self.conn.execute(
+            "SELECT COUNT(*) FROM products WHERE brand_id = ?",
+            (brand_id,),
+        )
+        return cursor.fetchone()[0]
 
     def _parse_product_list(self, html: str) -> List[Tuple[str, str]]:
         root = parse_html(html)
