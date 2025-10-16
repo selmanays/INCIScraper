@@ -131,7 +131,12 @@ class INCIScraper:
         LOGGER.info("Starting product detail collection")
         self.scrape_product_details()
 
-    def scrape_brands(self, *, reset_offset: bool = False) -> None:
+    def scrape_brands(
+        self,
+        *,
+        reset_offset: bool = False,
+        max_pages: int | None = None,
+    ) -> None:
         if reset_offset:
             self._set_metadata("brands_next_offset", "1")
         start_offset = int(self._get_metadata("brands_next_offset", "1"))
@@ -195,6 +200,12 @@ class INCIScraper:
                     extra=extra,
                 )
             offset += 1
+            if max_pages is not None and processed_pages >= max_pages:
+                LOGGER.info(
+                    "Reached max pages limit (%s) – stopping brand scraping early",
+                    max_pages,
+                )
+                break
             time.sleep(REQUEST_SLEEP)
         final_total = max(estimated_total_offsets, offset - 1)
         self._set_metadata("brands_total_offsets", str(final_total))

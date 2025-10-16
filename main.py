@@ -35,6 +35,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run only a specific pipeline step",
     )
     parser.add_argument(
+        "--max-pages",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Limit the number of brand listing pages fetched during the brands step. "
+            "Ignored for other steps."
+        ),
+    )
+    parser.add_argument(
         "--resume/--no-resume",
         dest="resume",
         default=True,
@@ -60,6 +70,8 @@ def configure_logging(level: str) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.max_pages is not None and args.max_pages < 1:
+        parser.error("--max-pages must be a positive integer")
     configure_logging(args.log_level)
     scraper = INCIScraper(db_path=args.db, image_dir=args.images_dir, base_url=args.base_url)
     try:
@@ -81,7 +93,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         if args.step in {"all", "brands"}:
             if args.step == "brands" or not args.resume or scraper.has_brand_work():
-                scraper.scrape_brands(reset_offset=not args.resume)
+                scraper.scrape_brands(
+                    reset_offset=not args.resume,
+                    max_pages=args.max_pages,
+                )
             else:
                 logging.info("Skipping brand collection – already complete")
         if args.step in {"all", "products"}:
