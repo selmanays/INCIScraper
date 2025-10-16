@@ -27,7 +27,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 from urllib import error, parse, request
 
 from .parser import Node, extract_text, parse_html
@@ -39,6 +39,45 @@ USER_AGENT = "INCIScraper/1.0 (+https://incidecoder.com)"
 DEFAULT_TIMEOUT = 30
 REQUEST_SLEEP = 0.5  # polite delay between HTTP requests
 PROGRESS_LOG_INTERVAL = 10
+
+EXPECTED_SCHEMA: Dict[str, Set[str]] = {
+    "brands": {"id", "name", "url", "products_scraped"},
+    "products": {
+        "id",
+        "brand_id",
+        "name",
+        "url",
+        "description",
+        "image_path",
+        "ingredient_functions_json",
+        "highlights_json",
+        "discontinued",
+        "replacement_product_url",
+        "details_scraped",
+    },
+    "ingredients": {
+        "id",
+        "name",
+        "url",
+        "rating_tag",
+        "also_called",
+        "what_it_does_json",
+        "what_it_does_links_json",
+        "irritancy",
+        "comedogenicity",
+        "tooltip_links_json",
+        "official_cosing_json",
+        "details_section_html",
+        "details_links_json",
+    },
+    "product_ingredients": {
+        "product_id",
+        "ingredient_id",
+        "tooltip_text",
+        "tooltip_ingredient_link",
+    },
+    "metadata": {"key", "value"},
+}
 
 
 @dataclass
@@ -98,7 +137,6 @@ class IngredientDetails:
     official_cosing: Dict[str, str]
     details_section: str
     details_links: List[str]
-    related_products: List[Dict[str, str]]
 
 
 class INCIScraper:
@@ -369,13 +407,6 @@ class INCIScraper:
                 details_links_json TEXT
             );
 
-            CREATE TABLE IF NOT EXISTS ingredient_related_products (
-                ingredient_id INTEGER NOT NULL REFERENCES ingredients(id),
-                product_name TEXT NOT NULL,
-                product_url TEXT NOT NULL,
-                UNIQUE (ingredient_id, product_url)
-            );
-
             CREATE TABLE IF NOT EXISTS product_ingredients (
                 product_id INTEGER NOT NULL REFERENCES products(id),
                 ingredient_id INTEGER NOT NULL REFERENCES ingredients(id),
@@ -393,6 +424,7 @@ class INCIScraper:
         self.conn.commit()
         self._ensure_column("products", "discontinued", "INTEGER NOT NULL DEFAULT 0")
         self._ensure_column("products", "replacement_product_url", "TEXT")
+        self._enforce_schema()
 
     # ------------------------------------------------------------------
     # Metadata helpers
@@ -424,6 +456,24 @@ class INCIScraper:
         if column not in columns:
             self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
             self.conn.commit()
+
+    def _enforce_schema(self) -> None:
+        cursor = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        existing_tables = {row["name"] for row in cursor.fetchall()}
+        for table in existing_tables:
+            if table.startswith("sqlite_"):
+                continue
+            if table not in EXPECTED_SCHEMA:
+                LOGGER.info("Dropping unexpected table: %s", table)
+                self.conn.execute(f"DROP TABLE IF EXISTS {table}")
+        for table, expected_columns in EXPECTED_SCHEMA.items():
+            cursor = self.conn.execute(f"PRAGMA table_info({table})")
+            actual_columns = {row["name"] for row in cursor.fetchall()}
+            extra_columns = actual_columns - expected_columns
+            for column in extra_columns:
+                LOGGER.info("Dropping unexpected column %s.%s", table, column)
+                self.conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        self.conn.commit()
 
     # ------------------------------------------------------------------
     # Workload inspection helpers
@@ -973,7 +1023,6 @@ class INCIScraper:
                     tooltip_links.append(self._absolute_url(href))
         cosing = self._parse_cosing_section(root)
         details_section_html, details_links = self._parse_details_section(root)
-        related_products = self._parse_related_products(root)
         return IngredientDetails(
             name=name,
             url=url,
@@ -987,7 +1036,6 @@ class INCIScraper:
             official_cosing=cosing,
             details_section=details_section_html,
             details_links=details_links,
-            related_products=related_products,
         )
 
     def _build_label_map(self, root: Node) -> Dict[str, Node]:
@@ -1083,25 +1131,6 @@ class INCIScraper:
                 links.append(self._absolute_url(href))
         return "\n".join(paragraphs), links
 
-    def _parse_related_products(self, root: Node) -> List[Dict[str, str]]:
-        container = root.find(id_="product")
-        if not container:
-            return []
-        entries: List[Dict[str, str]] = []
-        for anchor in container.find_all(tag="a"):
-            if not anchor.has_class("simpletextlistitem"):
-                continue
-            href = anchor.get("href")
-            name = extract_text(anchor)
-            if href and name:
-                entries.append(
-                    {
-                        "product_name": name,
-                        "product_page": self._absolute_url(href),
-                    }
-                )
-        return entries
-
     def _store_ingredient_details(self, details: IngredientDetails) -> int:
         cur = self.conn.execute(
             """
@@ -1127,11 +1156,6 @@ class INCIScraper:
             ),
         )
         ingredient_id = cur.lastrowid
-        for entry in details.related_products:
-            self.conn.execute(
-                "INSERT OR IGNORE INTO ingredient_related_products (ingredient_id, product_name, product_url) VALUES (?, ?, ?)",
-                (ingredient_id, entry["product_name"], entry["product_page"]),
-            )
         return ingredient_id
 
     # ------------------------------------------------------------------

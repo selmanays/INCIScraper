@@ -60,11 +60,11 @@ Scraper aşağıdaki tabloları oluşturur:
 - **ingredients** – Her bir bileşenin detay sayfasından toplanan veriler.
 - **product_ingredients** – Ürünler ile bileşenler arasındaki çoktan çoğa ilişki
   ve varsa kısa açıklama/tooltip içerikleri.
-- **ingredient_related_products** – Bileşen sayfalarında listelenen ilgili
-  ürünler.
 
 Tüm tablolar `UNIQUE` kısıtları ve durum bayrakları (`products_scraped`,
-`details_scraped`) sayesinde tekrar çalıştırmalara dayanıklıdır.
+`details_scraped`) sayesinde tekrar çalıştırmalara dayanıklıdır. Scraper her
+başlatıldığında veritabanı şemasını doğrular; beklenmeyen tablo veya sütunlar
+tespit edilirse otomatik olarak kaldırılır.
 
 ## Notlar
 
