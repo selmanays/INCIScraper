@@ -38,6 +38,7 @@ BASE_URL = "https://incidecoder.com"
 USER_AGENT = "INCIScraper/1.0 (+https://incidecoder.com)"
 DEFAULT_TIMEOUT = 30
 REQUEST_SLEEP = 0.5  # polite delay between HTTP requests
+PROGRESS_LOG_INTERVAL = 10
 
 
 @dataclass
@@ -136,8 +137,29 @@ class INCIScraper:
         start_offset = int(self._get_metadata("brands_next_offset", "1"))
         if start_offset > 1:
             LOGGER.info("Resuming brand collection from offset %s", start_offset)
+        total_offsets_known = int(self._get_metadata("brands_total_offsets", "0") or 0)
+        planned_pages = 0
+        if total_offsets_known:
+            planned_pages = max(total_offsets_known - start_offset + 1, 0)
+            if planned_pages <= 0 and not reset_offset:
+                LOGGER.info(
+                    "Brand workload already complete according to metadata (total offsets: %s)",
+                    total_offsets_known,
+                )
+                return
+            LOGGER.info(
+                "Brand workload: %s/%s page offsets remaining",
+                planned_pages if planned_pages > 0 else 0,
+                total_offsets_known,
+            )
+        else:
+            LOGGER.info(
+                "Brand workload: unknown total page count – metadata not yet populated"
+            )
         self._set_metadata("brands_complete", "0")
         offset = start_offset
+        processed_pages = 0
+        estimated_total_offsets = total_offsets_known if total_offsets_known else 0
         while True:
             page_url = f"{self.base_url}/brands?offset={offset}"
             LOGGER.info("Fetching brand page %s", page_url)
@@ -157,14 +179,53 @@ class INCIScraper:
             LOGGER.info("Stored %s brands from %s", new_entries, page_url)
             self.conn.commit()
             self._set_metadata("brands_next_offset", str(offset + 1))
+            processed_pages += 1
+            estimated_total_offsets = max(estimated_total_offsets, offset)
+            if processed_pages % PROGRESS_LOG_INTERVAL == 0:
+                total_for_log = planned_pages if planned_pages else 0
+                if total_for_log and processed_pages > total_for_log:
+                    total_for_log = processed_pages
+                extra = f"last offset={offset}"
+                if not total_offsets_known:
+                    extra = f"{extra}; total unknown"
+                self._log_progress(
+                    "Brand page",
+                    processed_pages,
+                    total_for_log,
+                    extra=extra,
+                )
             offset += 1
             time.sleep(REQUEST_SLEEP)
+        final_total = max(estimated_total_offsets, offset - 1)
+        self._set_metadata("brands_total_offsets", str(final_total))
+        if processed_pages:
+            total_for_log = planned_pages if planned_pages else 0
+            if not total_for_log and final_total >= start_offset:
+                total_for_log = final_total - start_offset + 1
+            if total_for_log and processed_pages > total_for_log:
+                total_for_log = processed_pages
+            extra = f"last offset={offset - 1}"
+            if not total_offsets_known:
+                extra = f"{extra}; total unknown"
+            self._log_progress(
+                "Brand page",
+                processed_pages,
+                total_for_log,
+                extra=extra,
+            )
 
     def scrape_products(self) -> None:
         cursor = self.conn.execute(
             "SELECT id, name, url FROM brands WHERE products_scraped = 0 ORDER BY id"
         )
-        for brand in cursor.fetchall():
+        pending_brands = cursor.fetchall()
+        total_brands = len(pending_brands)
+        if total_brands == 0:
+            LOGGER.info("No brands require product scraping – skipping stage")
+            return
+        LOGGER.info("Product workload: %s brand(s) awaiting scraping", total_brands)
+        processed = 0
+        for brand in pending_brands:
             brand_id = brand["id"]
             brand_url = brand["url"]
             resume_key = f"brand_products_next_offset:{brand_id}"
@@ -201,12 +262,22 @@ class INCIScraper:
                 products_found,
                 status,
             )
+            processed += 1
+            if processed % PROGRESS_LOG_INTERVAL == 0 or processed == total_brands:
+                self._log_progress("Brand", processed, total_brands)
 
     def scrape_product_details(self) -> None:
         cursor = self.conn.execute(
             "SELECT id, brand_id, name, url FROM products WHERE details_scraped = 0 ORDER BY id"
         )
-        for product in cursor.fetchall():
+        pending_products = cursor.fetchall()
+        total_products = len(pending_products)
+        if total_products == 0:
+            LOGGER.info("No products require detail scraping – skipping stage")
+            return
+        LOGGER.info("Detail workload: %s product(s) awaiting scraping", total_products)
+        processed = 0
+        for product in pending_products:
             LOGGER.info("Fetching product details for %s", product["url"])
             html = self._fetch_html(product["url"])
             if html is None:
@@ -224,6 +295,9 @@ class INCIScraper:
             )
             self.conn.commit()
             LOGGER.info("Stored product details for %s", details.name)
+            processed += 1
+            if processed % PROGRESS_LOG_INTERVAL == 0 or processed == total_products:
+                self._log_progress("Product", processed, total_products)
 
     def close(self) -> None:
         self.conn.close()
@@ -334,6 +408,43 @@ class INCIScraper:
             "SELECT 1 FROM products WHERE details_scraped = 0 LIMIT 1"
         )
         return cursor.fetchone() is not None
+
+    @staticmethod
+    def _log_progress(stage: str, processed: int, total: int, *, extra: str | None = None) -> None:
+        if total > 0:
+            percent = (processed / total) * 100
+            message = f"{stage} progress: {processed}/{total} ({percent:.1f}%)"
+        else:
+            message = f"{stage} progress: processed {processed} item(s)"
+        if extra:
+            message = f"{message} – {extra}"
+        LOGGER.info(message)
+
+    def get_workload_summary(self) -> Dict[str, Optional[int]]:
+        brand_count = self.conn.execute("SELECT COUNT(*) FROM brands").fetchone()[0]
+        product_count = self.conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+        brands_pending_products = self.conn.execute(
+            "SELECT COUNT(*) FROM brands WHERE products_scraped = 0"
+        ).fetchone()[0]
+        products_pending_details = self.conn.execute(
+            "SELECT COUNT(*) FROM products WHERE details_scraped = 0"
+        ).fetchone()[0]
+        start_offset = int(self._get_metadata("brands_next_offset", "1"))
+        total_offsets_known = int(self._get_metadata("brands_total_offsets", "0") or 0)
+        brand_pages_remaining: Optional[int]
+        if total_offsets_known:
+            brand_pages_remaining = max(total_offsets_known - start_offset + 1, 0)
+        elif self._get_metadata("brands_complete") == "1":
+            brand_pages_remaining = 0
+        else:
+            brand_pages_remaining = None
+        return {
+            "brand_pages_remaining": brand_pages_remaining,
+            "brands_pending_products": brands_pending_products,
+            "products_pending_details": products_pending_details,
+            "brands_total": brand_count,
+            "products_total": product_count,
+        }
 
     # ------------------------------------------------------------------
     # Brand scraping helpers
