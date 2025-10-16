@@ -1,16 +1,21 @@
 # INCIScraper
 
 Bu proje [INCIDecoder](https://incidecoder.com) sitesinden marka, ürün ve
-bileşen verilerini toplamayı amaçlayan bağımsız bir kazıyıcı içerir. Uygulama
-hiçbir üçüncü parti bağımlılık gerektirmez; HTML çözümlemeleri dahili olarak
-sağlanan hafif bir ayrıştırıcı ile yapılır.
+bileşen verilerini toplamayı amaçlayan bağımsız bir kazıyıcı içerir. HTML
+çözümlemeleri dahili olarak sağlanan hafif bir ayrıştırıcı ile yapılırken görsel
+işleme için `Pillow` kütüphanesinden yararlanılır.
 
 ## Kurulum
 
 1. Python 3.11 veya üzeri bir sürüm kullanın.
 2. Depoyu klonladıktan sonra sanal bir ortam oluşturmanız tavsiye edilir (zorunlu
    değildir).
-3. Proje bağımlılık gerektirmediğinden ek bir yükleme adımı yoktur.
+3. Görsel sıkıştırma için kullanılan `Pillow` bağımlılığını kurmak üzere aşağıdaki
+   komutu çalıştırın:
+
+   ```bash
+   pip install Pillow
+   ```
 
 ## Kullanım
 
@@ -42,7 +47,10 @@ python main.py --step details
 Diğer yararlı parametreler:
 
 - `--db`: Kullanılacak SQLite veritabanının yolu (varsayılan: `incidecoder.db`).
-- `--images-dir`: İndirilen ürün görsellerinin kaydedileceği dizin (varsayılan: `images`).
+- `--images-dir`: İndirilen ürün görsellerinin kaydedileceği dizin (varsayılan:
+  `images`). Her ürünün görselleri ürün kimliğini taşıyan ayrı bir klasörde
+  saklanır ve görseller kaydedilirken kalite bozulmadan mümkün olan en iyi
+  sıkıştırma uygulanır.
 - `--base-url`: Gerekirse INCIDecoder için alternatif bir kök URL tanımlar
   (örneğin yerel testler için).
 - `--max-pages`: Marka listesi toplama adımında indirilecek sayfa sayısını sınırlar.
