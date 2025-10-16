@@ -160,6 +160,7 @@ class INCIScraper:
         offset = start_offset
         processed_pages = 0
         estimated_total_offsets = total_offsets_known if total_offsets_known else 0
+        completed_normally = False
         while True:
             page_url = f"{self.base_url}/brands?offset={offset}"
             LOGGER.info("Fetching brand page %s", page_url)
@@ -172,6 +173,7 @@ class INCIScraper:
                 LOGGER.info("No brands found on page %s – stopping", page_url)
                 self._set_metadata("brands_complete", "1")
                 self._set_metadata("brands_next_offset", "1")
+                completed_normally = True
                 break
             new_entries = 0
             for name, url in brands:
@@ -197,7 +199,10 @@ class INCIScraper:
             offset += 1
             time.sleep(REQUEST_SLEEP)
         final_total = max(estimated_total_offsets, offset - 1)
-        self._set_metadata("brands_total_offsets", str(final_total))
+        if completed_normally:
+            self._set_metadata("brands_total_offsets", str(final_total))
+        else:
+            self._set_metadata("brands_total_offsets", "0")
         if processed_pages:
             total_for_log = planned_pages if planned_pages else 0
             if not total_for_log and final_total >= start_offset:
