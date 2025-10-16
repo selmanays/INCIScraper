@@ -585,10 +585,20 @@ class INCIScraper:
         fallback_attempted = False
         while True:
             page_url = self._append_offset(brand_url, offset)
-            LOGGER.debug("Fetching product listing page %s", page_url)
-            html = self._fetch_html(page_url)
+            current_url = page_url
+            LOGGER.debug("Fetching product listing page %s", current_url)
+            html = self._fetch_html(current_url)
+            if html is None and offset == start_offset == 1 and not fallback_attempted:
+                if "?offset=" not in brand_url:
+                    LOGGER.debug(
+                        "First attempt for %s failed – retrying without offset",
+                        brand_url,
+                    )
+                    fallback_attempted = True
+                    current_url = brand_url
+                    html = self._fetch_html(current_url)
             if html is None:
-                LOGGER.warning("Unable to download product listing %s", page_url)
+                LOGGER.warning("Unable to download product listing %s", current_url)
                 return total, False, offset
             products = self._parse_product_list(html)
             if (
@@ -1168,21 +1178,29 @@ class INCIScraper:
     # ------------------------------------------------------------------
     # Networking helpers
     # ------------------------------------------------------------------
-    def _fetch_html(self, url: str) -> Optional[str]:
-        data = self._fetch(url)
+    def _fetch_html(self, url: str, *, attempts: int = 3) -> Optional[str]:
+        data = self._fetch(url, attempts=attempts)
         if data is None:
             return None
         return data.decode("utf-8", errors="replace")
 
-    def _fetch(self, url: str) -> Optional[bytes]:
-        LOGGER.debug("Downloading %s", url)
-        req = request.Request(url, headers={"User-Agent": USER_AGENT})
-        try:
-            with request.urlopen(req, timeout=self.timeout) as response:
-                return response.read()
-        except error.URLError as exc:  # pragma: no cover - network errors are hard to simulate
-            LOGGER.error("Failed to download %s: %s", url, exc)
-            return None
+    def _fetch(self, url: str, *, attempts: int = 3) -> Optional[bytes]:
+        delay = REQUEST_SLEEP
+        for attempt in range(1, attempts + 1):
+            LOGGER.debug("Downloading %s (attempt %s/%s)", url, attempt, attempts)
+            req = request.Request(url, headers={"User-Agent": USER_AGENT})
+            try:
+                with request.urlopen(req, timeout=self.timeout) as response:
+                    return response.read()
+            except error.URLError as exc:  # pragma: no cover - network errors are hard to simulate
+                if attempt == attempts:
+                    LOGGER.error("Failed to download %s: %s", url, exc)
+                    return None
+                LOGGER.warning(
+                    "Attempt %s to download %s failed (%s) – retrying", attempt, url, exc
+                )
+                time.sleep(delay)
+                delay *= 2
 
     def _download_product_image(
         self,
