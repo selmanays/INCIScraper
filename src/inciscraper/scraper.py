@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import socket
 import sqlite3
 import time
 from io import BytesIO
@@ -156,6 +157,7 @@ class INCIScraper:
         image_dir: str | os.PathLike[str] = "images",
         base_url: str = BASE_URL,
         request_timeout: int = DEFAULT_TIMEOUT,
+        alternate_base_urls: Optional[Iterable[str]] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = request_timeout
@@ -164,6 +166,10 @@ class INCIScraper:
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self._init_db()
+        self._host_failover: Dict[str, str] = {}
+        self._host_alternatives = self._build_host_alternatives(
+            self.base_url, alternate_base_urls or []
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -1228,21 +1234,122 @@ class INCIScraper:
 
     def _fetch(self, url: str, *, attempts: int = 3) -> Optional[bytes]:
         delay = REQUEST_SLEEP
+        original_parts = parse.urlsplit(url)
+        current_url = self._apply_host_override(url)
+        canonical_host = original_parts.hostname
+        alternative_hosts = list(self._host_alternatives.get(canonical_host or "", []))
+        alt_index = 0
+
         for attempt in range(1, attempts + 1):
-            LOGGER.debug("Downloading %s (attempt %s/%s)", url, attempt, attempts)
-            req = request.Request(url, headers={"User-Agent": USER_AGENT})
+            LOGGER.debug("Downloading %s (attempt %s/%s)", current_url, attempt, attempts)
+            req = request.Request(current_url, headers={"User-Agent": USER_AGENT})
             try:
                 with request.urlopen(req, timeout=self.timeout) as response:
+                    if (
+                        canonical_host
+                        and canonical_host not in self._host_failover
+                        and parse.urlsplit(current_url).hostname != canonical_host
+                    ):
+                        # Persist the working host so future requests do not repeat the
+                        # failing DNS lookup.
+                        working_host = parse.urlsplit(current_url).hostname
+                        if working_host:
+                            self._host_failover[canonical_host] = working_host
                     return response.read()
             except error.URLError as exc:  # pragma: no cover - network errors are hard to simulate
+                root_cause = getattr(exc, "reason", None)
+                if (
+                    canonical_host
+                    and isinstance(root_cause, socket.gaierror)
+                    and alt_index < len(alternative_hosts)
+                ):
+                    next_host = alternative_hosts[alt_index]
+                    alt_index += 1
+                    replacement = self._replace_host(original_parts, next_host)
+                    if replacement:
+                        LOGGER.warning(
+                            "DNS resolution failed for %s – retrying with alternate host %s",
+                            current_url,
+                            next_host,
+                        )
+                        self._host_failover[canonical_host] = next_host
+                        current_url = replacement
+                        time.sleep(delay)
+                        delay *= 2
+                        continue
+
                 if attempt == attempts:
-                    LOGGER.error("Failed to download %s: %s", url, exc)
+                    LOGGER.error("Failed to download %s: %s", current_url, exc)
                     return None
                 LOGGER.warning(
-                    "Attempt %s to download %s failed (%s) – retrying", attempt, url, exc
+                    "Attempt %s to download %s failed (%s) – retrying",
+                    attempt,
+                    current_url,
+                    exc,
                 )
                 time.sleep(delay)
                 delay *= 2
+                current_url = self._apply_host_override(url)
+
+        return None
+
+    def _apply_host_override(self, url: str) -> str:
+        parts = parse.urlsplit(url)
+        host = parts.hostname
+        if not host:
+            return url
+        override = self._host_failover.get(host)
+        if not override or override == host:
+            return url
+        replacement = self._replace_host(parts, override)
+        return replacement or url
+
+    def _build_host_alternatives(
+        self, base_url: str, alternate_base_urls: Iterable[str]
+    ) -> Dict[str, List[str]]:
+        hosts: List[str] = []
+
+        def _ensure_host(value: Optional[str]) -> None:
+            if value and value not in hosts:
+                hosts.append(value)
+
+        base_host = parse.urlsplit(base_url).hostname
+        _ensure_host(base_host)
+        for candidate in alternate_base_urls:
+            parsed_host = parse.urlsplit(candidate.rstrip("/")).hostname
+            _ensure_host(parsed_host)
+
+        # Ensure common "www" variations are available as fallbacks in both directions.
+        for existing in list(hosts):
+            if existing.startswith("www."):
+                _ensure_host(existing[4:])
+            else:
+                _ensure_host(f"www.{existing}")
+
+        alternatives: Dict[str, List[str]] = {}
+        for host in hosts:
+            alt_candidates: List[str] = [h for h in hosts if h != host]
+
+            unique_alts: List[str] = []
+            for alt in alt_candidates:
+                if alt and alt != host and alt not in unique_alts:
+                    unique_alts.append(alt)
+            if unique_alts:
+                alternatives[host] = unique_alts
+
+        return alternatives
+
+    def _replace_host(self, parts: parse.SplitResult, new_host: str) -> Optional[str]:
+        if parts.hostname is None:
+            return None
+        if parts.username or parts.password:
+            return None
+
+        netloc = new_host
+        if parts.port:
+            netloc = f"{netloc}:{parts.port}"
+
+        return parse.urlunsplit((parts.scheme, netloc, parts.path, parts.query, parts.fragment))
 
     def _download_product_image(
         self,
