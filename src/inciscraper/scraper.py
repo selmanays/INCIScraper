@@ -202,7 +202,7 @@ class INCIScraper:
         if completed_normally:
             self._set_metadata("brands_total_offsets", str(final_total))
         else:
-            self._set_metadata("brands_total_offsets", "0")
+            self._delete_metadata("brands_total_offsets")
         if processed_pages:
             total_for_log = planned_pages if planned_pages else 0
             if not total_for_log and final_total >= start_offset:
