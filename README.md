@@ -16,10 +16,11 @@ sağlanan hafif bir ayrıştırıcı ile yapılır.
 
 Komut satırı arayüzü `main.py` dosyasında bulunur. Varsayılan davranış, tüm
 pipeline adımlarını (markalar → ürünler → ürün detayları) sırasıyla
-çalıştırmaktır. CLI daha önce tamamlanmış aşamaları otomatik olarak atlar; bu
-sayede kısa süreli oturumlarda (örneğin iki dakikalık terminal limitleri) işlem
-yarıda kalsa bile komutu yeniden çalıştırarak kaldığınız yerden devam
-edebilirsiniz.
+çalıştırmaktır. Uygulama başlarken veritabanındaki mevcut durumu özetleyen bir
+“iş yükü” raporu yazar ve daha önce tamamlanmış aşamaları otomatik olarak
+atlar; bu sayede kısa süreli oturumlarda (örneğin iki dakikalık terminal
+limitleri) işlem yarıda kalsa bile komutu yeniden çalıştırarak kaldığınız
+yerden devam edebilirsiniz.
 
 ```bash
 python main.py
@@ -42,6 +43,8 @@ Diğer yararlı parametreler:
 
 - `--db`: Kullanılacak SQLite veritabanının yolu (varsayılan: `incidecoder.db`).
 - `--images-dir`: İndirilen ürün görsellerinin kaydedileceği dizin (varsayılan: `images`).
+- `--base-url`: Gerekirse INCIDecoder için alternatif bir kök URL tanımlar
+  (örneğin yerel testler için).
 - `--max-pages`: Marka listesi toplama adımında indirilecek sayfa sayısını sınırlar.
 - `--resume/--no-resume`: Tüm pipeline'ı çalıştırırken tamamlanmış adımları
   atlayıp atlamama davranışını belirler (varsayılan: `--resume`).
