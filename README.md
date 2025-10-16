@@ -53,6 +53,9 @@ Diğer yararlı parametreler:
   sıkıştırma uygulanır.
 - `--base-url`: Gerekirse INCIDecoder için alternatif bir kök URL tanımlar
   (örneğin yerel testler için).
+- `--alternate-base-url`: Birincil alan adının DNS çözümü başarısız olduğunda
+  otomatik olarak denenecek ek kök URL'ler tanımlar. Birden fazla kez
+  kullanılabilir.
 - `--max-pages`: Marka listesi toplama adımında indirilecek sayfa sayısını sınırlar.
 - `--resume/--no-resume`: Tüm pipeline'ı çalıştırırken tamamlanmış adımları
   atlayıp atlamama davranışını belirler (varsayılan: `--resume`).

@@ -29,6 +29,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override the INCIDecoder base URL (useful for testing)",
     )
     parser.add_argument(
+        "--alternate-base-url",
+        action="append",
+        default=None,
+        metavar="URL",
+        help=(
+            "Additional base URLs that will be tried automatically if the primary host "
+            "cannot be resolved. The option can be specified multiple times."
+        ),
+    )
+    parser.add_argument(
         "--step",
         choices=["all", "brands", "products", "details"],
         default="all",
@@ -73,7 +83,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.max_pages is not None and args.max_pages < 1:
         parser.error("--max-pages must be a positive integer")
     configure_logging(args.log_level)
-    scraper = INCIScraper(db_path=args.db, image_dir=args.images_dir, base_url=args.base_url)
+    scraper = INCIScraper(
+        db_path=args.db,
+        image_dir=args.images_dir,
+        base_url=args.base_url,
+        alternate_base_urls=args.alternate_base_url,
+    )
     try:
         scraper.resume_incomplete_metadata()
         summary = scraper.get_workload_summary()
