@@ -1,5 +1,7 @@
 """Lightweight HTML parsing utilities used by the INCIScraper project.
 
+Türkçe: INCIScraper projesinde kullanılan hafif HTML ayrıştırma yardımcıları.
+
 The execution environment for these kata style exercises typically does not
 allow fetching external dependencies such as BeautifulSoup.  To keep the
 scraper implementation reasonably ergonomic while staying dependency free,
@@ -65,10 +67,18 @@ class Node:
     content: List[ContentItem] = field(default_factory=list)
 
     def append_child(self, child: "Node") -> None:
+        """Attach ``child`` as the last child of the current node.
+
+        Türkçe: Verilen ``child`` düğümünü mevcut düğümün altına ekler.
+        """
         child.parent = self
         self.content.append(child)
 
     def append_text(self, text: str) -> None:
+        """Append raw text to the node if the text is not empty.
+
+        Türkçe: Boş olmayan düz metni düğümün içeriğine ekler.
+        """
         if text:
             self.content.append(text)
 
@@ -77,23 +87,45 @@ class Node:
     # ------------------------------------------------------------------
     @property
     def children(self) -> Iterable["Node"]:
+        """Iterate over direct child nodes only.
+
+        Türkçe: Düğümün yalnızca alt düğümlerini sırasıyla döndürür.
+        """
         for item in self.content:
             if isinstance(item, Node):
                 yield item
 
     @property
     def text_items(self) -> Iterable[str]:
+        """Yield the raw text fragments contained in the node.
+
+        Türkçe: Düğüm içerisindeki düz metin parçalarını sırasıyla verir.
+        """
         for item in self.content:
             if isinstance(item, str):
                 yield item
 
     def get(self, attr: str, default: Optional[str] = None) -> Optional[str]:
+        """Return the value for attribute ``attr`` or ``default`` if missing.
+
+        Türkçe: İstenen niteliğin değerini döndürür; bulunamazsa varsayılanı
+        verir.
+        """
         return self.attrs.get(attr, default)
 
     def classes(self) -> List[str]:
+        """List all CSS classes defined on the node.
+
+        Türkçe: Düğümde tanımlı tüm CSS sınıflarını listeler.
+        """
         return [c for c in self.attrs.get("class", "").split() if c]
 
     def has_class(self, class_name: str) -> bool:
+        """Check whether the node includes ``class_name`` in its class list.
+
+        Türkçe: Düğümün sınıf listesinde verilen sınıfın olup olmadığını kontrol
+        eder.
+        """
         return class_name in self.classes()
 
     # ------------------------------------------------------------------
@@ -107,6 +139,10 @@ class Node:
         attrs: Optional[Dict[str, str]] = None,
         predicate: Optional[Callable[["Node"], bool]] = None,
     ) -> bool:
+        """Determine whether the node matches the given filters.
+
+        Türkçe: Düğümün sağlanan kriterleri karşılayıp karşılamadığını belirler.
+        """
         if tag and self.tag != tag:
             return False
         if id_ and self.attrs.get("id") != id_:
@@ -136,6 +172,10 @@ class Node:
         attrs: Optional[Dict[str, str]] = None,
         predicate: Optional[Callable[["Node"], bool]] = None,
     ) -> List["Node"]:
+        """Return a list of nodes matching the provided criteria.
+
+        Türkçe: Verilen koşulları sağlayan tüm düğümleri liste olarak döndürür.
+        """
         matches: List[Node] = []
         if self._match(tag, class_, id_, attrs, predicate):
             matches.append(self)
@@ -151,6 +191,10 @@ class Node:
         attrs: Optional[Dict[str, str]] = None,
         predicate: Optional[Callable[["Node"], bool]] = None,
     ) -> Optional["Node"]:
+        """Return the first node that satisfies the selection criteria.
+
+        Türkçe: Sağlanan kriterlerle eşleşen ilk düğümü döndürür.
+        """
         if self._match(tag, class_, id_, attrs, predicate):
             return self
         for child in self.children:
@@ -160,12 +204,21 @@ class Node:
         return None
 
     def iter(self, tag: Optional[str] = None) -> Iterator["Node"]:
+        """Yield nodes in depth-first order, optionally filtering by tag name.
+
+        Türkçe: Düğüm ağacını derinlik öncelikli dolaşarak isteğe bağlı olarak
+        belirli etiket adına göre süzer.
+        """
         if tag is None or self.tag == tag:
             yield self
         for child in self.children:
             yield from child.iter(tag)
 
     def next_siblings(self) -> Iterator["Node"]:
+        """Iterate over sibling nodes that appear after the current one.
+
+        Türkçe: Mevcut düğümden sonra gelen kardeş düğümleri sırasıyla verir.
+        """
         if not self.parent:
             return iter(())
         found_self = False
@@ -179,6 +232,10 @@ class Node:
                 yield item
 
     def previous_siblings(self) -> Iterator["Node"]:
+        """Iterate over sibling nodes that appear before the current one.
+
+        Türkçe: Mevcut düğümden önce gelen kardeş düğümleri sırasıyla verir.
+        """
         if not self.parent:
             return iter(())
         for item in reversed(self.parent.content):
@@ -191,9 +248,17 @@ class Node:
     # Data extraction
     # ------------------------------------------------------------------
     def get_text(self, strip: bool = True, separator: str = " ") -> str:
+        """Extract the textual content of the node and its descendants.
+
+        Türkçe: Düğüm ve alt düğümlerindeki metin içeriğini toplayıp döndürür.
+        """
         parts: List[str] = []
 
         def walk(node: "Node") -> None:
+            """Collect text recursively from ``node``.
+
+            Türkçe: ``node`` düğümündeki metinleri özyinelemeli olarak toplar.
+            """
             for item in node.content:
                 if isinstance(item, str):
                     parts.append(unescape(item))
@@ -207,9 +272,17 @@ class Node:
         return text
 
     def get_inner_html(self) -> str:
+        """Return the serialized HTML inside the node.
+
+        Türkçe: Düğümün içindeki HTML içeriğini serileştirip döndürür.
+        """
         parts: List[str] = []
 
         def render(node: "Node") -> None:
+            """Serialise ``node`` and its children into HTML.
+
+            Türkçe: ``node`` düğümünü ve alt öğelerini HTML olarak serileştirir.
+            """
             for item in node.content:
                 if isinstance(item, str):
                     parts.append(escape(item, quote=False))
@@ -232,9 +305,17 @@ class Node:
     # Utility helpers used by higher level scraping logic
     # ------------------------------------------------------------------
     def find_by_id(self, element_id: str) -> Optional["Node"]:
+        """Locate a descendant by its ``id`` attribute.
+
+        Türkçe: Alt düğümler arasında verilen ``id`` değerini arar.
+        """
         return self.find(id_=element_id)
 
     def find_all_by_class(self, class_name: str, tag: Optional[str] = None) -> List["Node"]:
+        """Return all descendants carrying the requested CSS class.
+
+        Türkçe: İstenen CSS sınıfına sahip tüm alt düğümleri döndürür.
+        """
         return [node for node in self.find_all(tag=tag) if node.has_class(class_name)]
 
 
@@ -242,12 +323,20 @@ class TreeBuilder(HTMLParser):
     """Parses raw HTML into a :class:`Node` tree."""
 
     def __init__(self) -> None:
+        """Initialise the incremental HTML parser state.
+
+        Türkçe: Artımlı HTML ayrıştırıcı durumunu oluşturur.
+        """
         super().__init__(convert_charrefs=True)
         self.root = Node("document", {})
         self.stack: List[Node] = [self.root]
 
     # HTMLParser interface -------------------------------------------------
     def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        """Handle an opening tag encountered in the HTML stream.
+
+        Türkçe: Ayrıştırılan HTML akışında görülen açılış etiketini işler.
+        """
         parent = self.stack[-1]
         attr_dict = {name: (value or "") for name, value in attrs}
         node = Node(tag, attr_dict, parent)
@@ -256,12 +345,20 @@ class TreeBuilder(HTMLParser):
             self.stack.append(node)
 
     def handle_startendtag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
+        """Process self-closing tags such as ``<img/>``.
+
+        Türkçe: ``<img/>`` benzeri kendi kendini kapatan etiketleri işler.
+        """
         self.handle_starttag(tag, attrs)
         # Ensure self closing tags do not stay on the stack
         if tag not in VOID_ELEMENTS and self.stack and self.stack[-1].tag == tag:
             self.stack.pop()
 
     def handle_endtag(self, tag: str) -> None:
+        """Close the most recent open tag matching ``tag``.
+
+        Türkçe: Verilen ada sahip son açık etiketi kapatır.
+        """
         # Pop until we encounter the requested tag.  The HTML on the site is
         # reasonably well formed, but this defensive approach keeps the parser
         # resilient to minor issues.
@@ -272,10 +369,18 @@ class TreeBuilder(HTMLParser):
         # If we did not find the tag we simply ignore the closing tag.
 
     def handle_data(self, data: str) -> None:
+        """Append text content to the current node.
+
+        Türkçe: Bulunduğu düğüme metin içeriği ekler.
+        """
         if data:
             self.stack[-1].append_text(data)
 
     def error(self, message: str) -> None:  # pragma: no cover - required override
+        """Propagate parser errors as :class:`ValueError`.
+
+        Türkçe: Ayrıştırma hatalarını :class:`ValueError` olarak yükseltir.
+        """
         raise ValueError(message)
 
 
@@ -291,6 +396,9 @@ def parse_html(html: str) -> Node:
     -------
     Node
         Artificial root node that contains the full parsed tree as children.
+
+    Türkçe: Verilen ham HTML'yi :class:`Node` ağacına dönüştürerek yapay kök
+    düğümünü döndürür.
     """
 
     builder = TreeBuilder()
@@ -304,14 +412,26 @@ def parse_html(html: str) -> Node:
 # ---------------------------------------------------------------------------
 
 def normalize_whitespace(value: str) -> str:
+    """Collapse runs of whitespace into single spaces.
+
+    Türkçe: Birden fazla boşluk karakterini tek boşluğa indirger.
+    """
     return " ".join(value.split())
 
 
 def extract_text(node: Optional[Node]) -> str:
+    """Return the text content of ``node`` or an empty string.
+
+    Türkçe: Düğümün metin içeriğini döndürür; yoksa boş string verir.
+    """
     return node.get_text(strip=True) if node else ""
 
 
 def find_first(node: Node, predicate: Callable[[Node], bool]) -> Optional[Node]:
+    """Find the first descendant that satisfies ``predicate``.
+
+    Türkçe: Koşulu sağlayan ilk alt düğümü bulup döndürür.
+    """
     for child in node.find_all():
         if predicate(child):
             return child
@@ -319,6 +439,10 @@ def find_first(node: Node, predicate: Callable[[Node], bool]) -> Optional[Node]:
 
 
 def iter_descendants(node: Node) -> Iterator[Node]:
+    """Yield all descendant nodes in document order.
+
+    Türkçe: Düğümün tüm alt düğümlerini belge sırasıyla üretir.
+    """
     for child in node.children:
         yield child
         yield from iter_descendants(child)
