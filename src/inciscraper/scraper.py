@@ -28,6 +28,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import socket
 import sqlite3
 import ssl
@@ -136,7 +137,7 @@ class IngredientReference:
     url: str
     tooltip_text: Optional[str]
     tooltip_ingredient_link: Optional[str]
-    ingredient_id: Optional[int] = None
+    ingredient_id: Optional[str] = None
 
 
 @dataclass
@@ -258,6 +259,12 @@ class INCIScraper:
         )
         self._ssl_context = ssl.create_default_context()
 
+    @staticmethod
+    def _generate_id() -> str:
+        """Return a random identifier suitable for primary keys."""
+
+        return secrets.token_hex(16)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -299,13 +306,6 @@ class INCIScraper:
             """
         )
         self.conn.commit()
-        for table in (
-            "brands",
-            "products",
-            "ingredients",
-            "ingredient_functions",
-        ):
-            self._reset_autoincrement_if_table_empty(table)
         LOGGER.info(
             "Collecting %s brand(s) and %s product(s) per brand for sample dataset",
             brand_count,
@@ -359,7 +359,6 @@ class INCIScraper:
 
         Türkçe: Marka listelerini toplar ve veritabanına kaydeder.
         """
-        self._reset_autoincrement_if_table_empty("brands")
         if reset_offset:
             self._set_metadata("brands_next_offset", "1")
         start_offset = int(self._get_metadata("brands_next_offset", "1"))
@@ -416,7 +415,8 @@ class INCIScraper:
             limit_reached = False
             for name, url in brands:
                 inserted = self._insert_brand(name, url)
-                new_entries += inserted
+                if inserted:
+                    new_entries += 1
                 if (
                     inserted
                     and max_brands is not None
@@ -634,7 +634,7 @@ class INCIScraper:
         cursor.executescript(
             """
             CREATE TABLE IF NOT EXISTS brands (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 url TEXT NOT NULL UNIQUE,
                 products_scraped INTEGER NOT NULL DEFAULT 0,
@@ -643,8 +643,8 @@ class INCIScraper:
             );
 
             CREATE TABLE IF NOT EXISTS products (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                brand_id INTEGER NOT NULL REFERENCES brands(id),
+                id TEXT PRIMARY KEY,
+                brand_id TEXT NOT NULL REFERENCES brands(id),
                 name TEXT NOT NULL,
                 url TEXT NOT NULL UNIQUE,
                 description TEXT,
@@ -661,7 +661,7 @@ class INCIScraper:
             );
 
             CREATE TABLE IF NOT EXISTS ingredients (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 url TEXT NOT NULL UNIQUE,
                 rating_tag TEXT,
@@ -681,7 +681,7 @@ class INCIScraper:
             );
 
             CREATE TABLE IF NOT EXISTS ingredient_functions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 url TEXT UNIQUE,
                 description TEXT
@@ -787,21 +787,6 @@ class INCIScraper:
         )
         self.conn.commit()
 
-    def _reset_autoincrement_if_table_empty(self, table: str) -> None:
-        """Reset the SQLite autoincrement counter when ``table`` has no rows.
-
-        Türkçe: Tablo boşaldığında SQLite otomatik artış sayacını sıfırlar.
-        """
-        count = self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-        if count != 0:
-            return
-        try:
-            self.conn.execute("DELETE FROM sqlite_sequence WHERE name = ?", (table,))
-            self.conn.commit()
-            LOGGER.info("Reset autoincrement sequence for empty table %s", table)
-        except sqlite3.OperationalError:
-            LOGGER.debug("sqlite_sequence not available when resetting table %s", table)
-
     def _ensure_ingredient_details_capacity(self) -> None:
         """Ensure the ingredient details column can store lengthy text values.
 
@@ -827,7 +812,7 @@ class INCIScraper:
         self.conn.executescript(
             """
             CREATE TABLE ingredients (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 url TEXT NOT NULL UNIQUE,
                 rating_tag TEXT,
@@ -1062,7 +1047,7 @@ class INCIScraper:
             brands.append((name, absolute))
         return brands
 
-    def _insert_brand(self, name: str, url: str) -> int:
+    def _insert_brand(self, name: str, url: str) -> bool:
         """Persist a brand if it does not already exist.
 
         Türkçe: Marka daha önce eklenmediyse veritabanına kaydeder.
@@ -1073,14 +1058,21 @@ class INCIScraper:
             (url,),
         ).fetchone()
         if row is None:
-            self.conn.execute(
-                """
-                INSERT INTO brands (name, url, products_scraped, last_checked_at, last_updated_at)
-                VALUES (?, ?, 0, ?, ?)
-                """,
-                (name, url, now, now),
-            )
-            return 1
+            while True:
+                brand_id = self._generate_id()
+                try:
+                    self.conn.execute(
+                        """
+                        INSERT INTO brands (id, name, url, products_scraped, last_checked_at, last_updated_at)
+                        VALUES (?, ?, ?, 0, ?, ?)
+                        """,
+                        (brand_id, name, url, now, now),
+                    )
+                except sqlite3.IntegrityError as exc:  # pragma: no cover - rare id collision
+                    if "brands.id" in str(exc):
+                        continue
+                    raise
+                return True
         updates: Dict[str, str] = {"last_checked_at": now}
         changed = False
         if row["name"] != name:
@@ -1095,11 +1087,11 @@ class INCIScraper:
                 f"UPDATE brands SET {assignments} WHERE id = ?",
                 params,
             )
-        return 0
+        return False
 
     def _collect_products_for_brand(
         self,
-        brand_id: int,
+        brand_id: str,
         brand_url: str,
         *,
         start_offset: int = 1,
@@ -1166,7 +1158,8 @@ class INCIScraper:
                 return total, True, offset
             for name, url in products:
                 inserted = self._insert_product(brand_id, name, url)
-                total += inserted
+                if inserted:
+                    total += 1
                 if (
                     max_products is not None
                     and existing_total + total >= max_products
@@ -1213,7 +1206,7 @@ class INCIScraper:
             )
         self.conn.commit()
 
-    def _count_products_for_brand(self, brand_id: int) -> int:
+    def _count_products_for_brand(self, brand_id: str) -> int:
         """Return how many products have been stored for the brand.
 
         Türkçe: Belirtilen marka için kaydedilen ürün sayısını verir.
@@ -1253,7 +1246,7 @@ class INCIScraper:
             products.append((name, absolute))
         return products
 
-    def _insert_product(self, brand_id: int, name: str, url: str) -> int:
+    def _insert_product(self, brand_id: str, name: str, url: str) -> bool:
         """Persist a product, updating its name if it already exists.
 
         Türkçe: Ürünü kaydeder; varsa adını günceller.
@@ -1264,15 +1257,22 @@ class INCIScraper:
             (url,),
         ).fetchone()
         if row is None:
-            self.conn.execute(
-                """
-                INSERT INTO products (
-                    brand_id, name, url, details_scraped, last_checked_at, last_updated_at
-                ) VALUES (?, ?, ?, 0, ?, ?)
-                """,
-                (brand_id, name, url, now, now),
-            )
-            return 1
+            while True:
+                product_id = self._generate_id()
+                try:
+                    self.conn.execute(
+                        """
+                        INSERT INTO products (
+                            id, brand_id, name, url, details_scraped, last_checked_at, last_updated_at
+                        ) VALUES (?, ?, ?, ?, 0, ?, ?)
+                        """,
+                        (product_id, brand_id, name, url, now, now),
+                    )
+                except sqlite3.IntegrityError as exc:  # pragma: no cover - rare id collision
+                    if "products.id" in str(exc):
+                        continue
+                    raise
+                return True
         updates: Dict[str, object] = {"last_checked_at": now}
         changed = False
         if row["name"] != name:
@@ -1290,7 +1290,7 @@ class INCIScraper:
                 f"UPDATE products SET {assignments} WHERE id = ?",
                 params,
             )
-        return 0
+        return False
 
     # ------------------------------------------------------------------
     # Product detail parsing
@@ -1530,7 +1530,7 @@ class INCIScraper:
     # ------------------------------------------------------------------
     def _store_product_details(
         self,
-        product_id: int,
+        product_id: str,
         details: ProductDetails,
         image_path: Optional[str],
     ) -> None:
@@ -1538,7 +1538,7 @@ class INCIScraper:
 
         Türkçe: Ayrıştırılan ürün detaylarını ve bileşen ilişkilerini kaydeder.
         """
-        ingredient_ids: List[int] = []
+        ingredient_ids: List[str] = []
         ingredient_refs: List[Dict[str, object]] = []
         for ingredient in details.ingredients:
             ingredient_id = self._ensure_ingredient(ingredient)
@@ -1654,7 +1654,7 @@ class INCIScraper:
                 (now, product_id),
             )
 
-    def _ensure_ingredient(self, ingredient: IngredientReference) -> int:
+    def _ensure_ingredient(self, ingredient: IngredientReference) -> str:
         """Ensure an ingredient record exists and return its identifier.
 
         Türkçe: Bileşen kaydını oluşturup kimliğini döndürür.
@@ -1664,15 +1664,25 @@ class INCIScraper:
             (ingredient.url,),
         ).fetchone()
         if row:
-            return row["id"]
+            return str(row["id"])
         try:
             details = self._scrape_ingredient_page(ingredient.url)
         except RuntimeError:
             LOGGER.exception("Failed to scrape ingredient %s", ingredient.url)
-            self.conn.execute(
-                "INSERT OR IGNORE INTO ingredients (name, url) VALUES (?, ?)",
-                (ingredient.name, ingredient.url),
-            )
+            while True:
+                generated_id = self._generate_id()
+                cursor = self.conn.execute(
+                    "INSERT OR IGNORE INTO ingredients (id, name, url) VALUES (?, ?, ?)",
+                    (generated_id, ingredient.name, ingredient.url),
+                )
+                if cursor.rowcount:
+                    break
+                row = self.conn.execute(
+                    "SELECT id FROM ingredients WHERE url = ?",
+                    (ingredient.url,),
+                ).fetchone()
+                if row:
+                    break
         else:
             ingredient_id = self._store_ingredient_details(details)
             return ingredient_id
@@ -1681,7 +1691,7 @@ class INCIScraper:
             (ingredient.url,),
         ).fetchone()
         if row:
-            return row["id"]
+            return str(row["id"])
         raise RuntimeError(f"Unable to store ingredient {ingredient.url}")
 
     # ------------------------------------------------------------------
@@ -1915,12 +1925,12 @@ class INCIScraper:
             return text
         return "\n\n".join(paragraphs)
 
-    def _store_ingredient_details(self, details: IngredientDetails) -> int:
+    def _store_ingredient_details(self, details: IngredientDetails) -> str:
         """Persist ingredient metadata and return the database identifier.
 
         Türkçe: Bileşen metadatasını kaydedip veritabanı kimliğini döndürür.
         """
-        function_ids: List[int] = []
+        function_ids: List[str] = []
         for function in details.functions:
             function_id = self._ensure_ingredient_function(function)
             if function_id is not None:
@@ -1956,35 +1966,46 @@ class INCIScraper:
             (details.url,),
         ).fetchone()
         now = self._current_timestamp()
+        result_id: Optional[str]
         if existing is None:
-            self.conn.execute(
-                """
-                INSERT INTO ingredients (
-                    name, url, rating_tag, also_called, function_ids_json,
-                    irritancy, comedogenicity, details_text, cosing_all_functions,
-                    cosing_description, cosing_cas, cosing_ec, cosing_chemical_name,
-                    cosing_restrictions, last_checked_at, last_updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    details.name,
-                    details.url,
-                    details.rating_tag,
-                    details.also_called,
-                    payload["function_ids_json"],
-                    details.irritancy,
-                    details.comedogenicity,
-                    details.details_text,
-                    details.cosing_all_functions,
-                    details.cosing_description,
-                    details.cosing_cas,
-                    details.cosing_ec,
-                    details.cosing_chemical_name,
-                    details.cosing_restrictions,
-                    now,
-                    now,
-                ),
-            )
+            while True:
+                ingredient_id = self._generate_id()
+                try:
+                    self.conn.execute(
+                        """
+                        INSERT INTO ingredients (
+                            id, name, url, rating_tag, also_called, function_ids_json,
+                            irritancy, comedogenicity, details_text, cosing_all_functions,
+                            cosing_description, cosing_cas, cosing_ec, cosing_chemical_name,
+                            cosing_restrictions, last_checked_at, last_updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ingredient_id,
+                            details.name,
+                            details.url,
+                            details.rating_tag,
+                            details.also_called,
+                            payload["function_ids_json"],
+                            details.irritancy,
+                            details.comedogenicity,
+                            details.details_text,
+                            details.cosing_all_functions,
+                            details.cosing_description,
+                            details.cosing_cas,
+                            details.cosing_ec,
+                            details.cosing_chemical_name,
+                            details.cosing_restrictions,
+                            now,
+                            now,
+                        ),
+                    )
+                except sqlite3.IntegrityError as exc:  # pragma: no cover - rare id collision
+                    if "ingredients.id" in str(exc):
+                        continue
+                    raise
+                break
+            result_id = ingredient_id
         else:
             changed = False
             for column, value in payload.items():
@@ -2004,15 +2025,16 @@ class INCIScraper:
                     "UPDATE ingredients SET last_checked_at = ? WHERE id = ?",
                     (now, existing["id"]),
                 )
+            result_id = str(existing["id"])
         row = self.conn.execute(
             "SELECT id FROM ingredients WHERE url = ?",
             (details.url,),
         ).fetchone()
         if not row:
             raise RuntimeError(f"Unable to store ingredient {details.url}")
-        return row["id"]
+        return result_id
 
-    def _ensure_ingredient_function(self, info: IngredientFunctionInfo) -> Optional[int]:
+    def _ensure_ingredient_function(self, info: IngredientFunctionInfo) -> Optional[str]:
         """Ensure an ingredient function entry exists and return its id.
 
         Türkçe: Bileşen fonksiyonu kaydını oluşturup kimliğini döndürür.
@@ -2050,15 +2072,22 @@ class INCIScraper:
                     f"UPDATE ingredient_functions SET {assignments} WHERE id = ?",
                     params,
                 )
-            return row["id"]
-        cur = self.conn.execute(
-            """
-            INSERT INTO ingredient_functions (name, url, description)
-            VALUES (?, ?, ?)
-            """,
-            (name, url, description),
-        )
-        return cur.lastrowid
+            return str(row["id"])
+        while True:
+            function_id = self._generate_id()
+            try:
+                self.conn.execute(
+                    """
+                    INSERT INTO ingredient_functions (id, name, url, description)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (function_id, name, url, description),
+                )
+            except sqlite3.IntegrityError as exc:  # pragma: no cover - rare id collision
+                if "ingredient_functions.id" in str(exc):
+                    continue
+                raise
+            return function_id
 
     # ------------------------------------------------------------------
     # Networking helpers
@@ -2409,7 +2438,7 @@ class INCIScraper:
         self,
         image_url: Optional[str],
         product_name: str,
-        product_id: int,
+        product_id: str,
     ) -> Optional[str]:
         """Download, optimise and store a product image on disk.
 
