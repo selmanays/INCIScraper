@@ -870,7 +870,9 @@ class INCIScraper:
                 cosing_restrictions TEXT,
                 quick_facts_json TEXT,
                 proof_references_json TEXT,
-                cosing_ph_eur_names_json TEXT
+                cosing_ph_eur_names_json TEXT,
+                last_checked_at TEXT,
+                last_updated_at TEXT
             );
             """
         )
@@ -878,7 +880,8 @@ class INCIScraper:
             "id, name, url, rating_tag, also_called, function_ids_json, irritancy, "
             "comedogenicity, details_text, cosing_all_functions, cosing_description, "
             "cosing_cas, cosing_ec, cosing_chemical_name, cosing_restrictions, "
-            "quick_facts_json, proof_references_json, cosing_ph_eur_names_json"
+            "quick_facts_json, proof_references_json, cosing_ph_eur_names_json, "
+            "last_checked_at, last_updated_at"
         )
         self.conn.execute(
             f"INSERT INTO ingredients ({columns}) SELECT {columns} FROM ingredients_backup"
