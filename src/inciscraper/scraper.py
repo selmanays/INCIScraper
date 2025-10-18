@@ -545,12 +545,14 @@ class INCIScraper:
     def _enforce_schema(self) -> None:
         cursor = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         existing_tables = {row["name"] for row in cursor.fetchall()}
+        dropped_tables: Set[str] = set()
         for table in existing_tables:
             if table.startswith("sqlite_"):
                 continue
             if table not in EXPECTED_SCHEMA:
                 LOGGER.info("Dropping unexpected table: %s", table)
                 self.conn.execute(f"DROP TABLE IF EXISTS {table}")
+                dropped_tables.add(table)
         for table, expected_columns in EXPECTED_SCHEMA.items():
             cursor = self.conn.execute(f"PRAGMA table_info({table})")
             rows = cursor.fetchall()
@@ -565,7 +567,52 @@ class INCIScraper:
                     sorted(actual_columns),
                 )
                 self.conn.execute(f"DROP TABLE IF EXISTS {table}")
+                dropped_tables.add(table)
         self.conn.commit()
+        if dropped_tables:
+            cursor = self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+            remaining_tables = {row["name"] for row in cursor.fetchall()}
+            self._reset_progress_after_schema_changes(dropped_tables, remaining_tables)
+
+    def _reset_progress_after_schema_changes(
+        self, dropped_tables: Set[str], remaining_tables: Set[str]
+    ) -> None:
+        metadata_available = "metadata" in remaining_tables
+        brands_available = "brands" in remaining_tables
+        products_available = "products" in remaining_tables
+
+        if "products" in dropped_tables:
+            if brands_available:
+                LOGGER.info(
+                    "Resetting products_scraped flags after products table rebuild",
+                )
+                self.conn.execute("UPDATE brands SET products_scraped = 0")
+            if metadata_available:
+                LOGGER.info(
+                    "Clearing product progress metadata after products table rebuild",
+                )
+                self.conn.execute(
+                    "DELETE FROM metadata WHERE key LIKE 'brand_products_next_offset:%'"
+                )
+                self.conn.execute(
+                    "DELETE FROM metadata WHERE key LIKE 'brand_empty_products:%'"
+                )
+
+        detail_tables = {
+            "ingredients",
+            "product_ingredients",
+            "ingredient_functions",
+        }
+        if detail_tables & dropped_tables and products_available:
+            LOGGER.info(
+                "Resetting product detail flags after ingredient table rebuild",
+            )
+            self.conn.execute("UPDATE products SET details_scraped = 0")
+
+        if dropped_tables:
+            self.conn.commit()
 
     # ------------------------------------------------------------------
     # Workload inspection helpers
