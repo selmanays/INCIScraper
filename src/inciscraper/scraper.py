@@ -73,9 +73,7 @@ EXPECTED_SCHEMA: Dict[str, Set[str]] = {
         "description",
         "image_path",
         "ingredient_ids_json",
-        "ingredient_references_json",
-        "ingredient_functions_json",
-        "highlights_json",
+        "free_tag_ids_json",
         "discontinued",
         "replacement_product_url",
         "details_scraped",
@@ -98,6 +96,9 @@ EXPECTED_SCHEMA: Dict[str, Set[str]] = {
         "cosing_ec",
         "cosing_chemical_name",
         "cosing_restrictions",
+        "quick_facts_json",
+        "proof_references_json",
+        "cosing_ph_eur_names_json",
         "last_checked_at",
         "last_updated_at",
     },
@@ -106,6 +107,11 @@ EXPECTED_SCHEMA: Dict[str, Set[str]] = {
         "name",
         "url",
         "description",
+    },
+    "frees": {
+        "id",
+        "tag",
+        "tooltip",
     },
     "metadata": {"key", "value"},
 }
@@ -116,13 +122,16 @@ ADDITIONAL_COLUMN_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "last_updated_at": "last_updated_at TEXT",
     },
     "products": {
-        "ingredient_references_json": "ingredient_references_json TEXT",
+        "free_tag_ids_json": "free_tag_ids_json TEXT",
         "last_checked_at": "last_checked_at TEXT",
         "last_updated_at": "last_updated_at TEXT",
     },
     "ingredients": {
         "last_checked_at": "last_checked_at TEXT",
         "last_updated_at": "last_updated_at TEXT",
+        "quick_facts_json": "quick_facts_json TEXT",
+        "proof_references_json": "proof_references_json TEXT",
+        "cosing_ph_eur_names_json": "cosing_ph_eur_names_json TEXT",
     },
 }
 
@@ -165,12 +174,24 @@ class HighlightEntry:
 
 
 @dataclass
+class FreeTag:
+    """A hashtag style marketing claim with an optional tooltip.
+
+    Türkçe: Tooltip açıklamasıyla beraber gelen hashtag tarzı pazarlama ifadesi.
+    """
+
+    tag: str
+    tooltip: Optional[str]
+
+
+@dataclass
 class ProductHighlights:
     """Container for hashtag and ingredient highlight sections.
 
     Türkçe: Hashtag ve bileşen vurgularını tutan veri yapısıdır.
     """
-    hashtags: List[str]
+
+    free_tags: List[FreeTag]
     key_ingredients: List[HighlightEntry]
     other_ingredients: List[HighlightEntry]
 
@@ -211,6 +232,9 @@ class IngredientDetails:
     cosing_ec: str
     cosing_chemical_name: str
     cosing_restrictions: str
+    quick_facts: List[str]
+    proof_references: List[str]
+    cosing_ph_eur_names: List[str]
 
 
 @dataclass
@@ -301,6 +325,7 @@ class INCIScraper:
             DELETE FROM products;
             DELETE FROM ingredients;
             DELETE FROM ingredient_functions;
+            DELETE FROM frees;
             DELETE FROM brands;
             DELETE FROM metadata;
             """
@@ -650,9 +675,7 @@ class INCIScraper:
                 description TEXT,
                 image_path TEXT,
                 ingredient_ids_json TEXT,
-                ingredient_references_json TEXT,
-                ingredient_functions_json TEXT,
-                highlights_json TEXT,
+                free_tag_ids_json TEXT,
                 discontinued INTEGER NOT NULL DEFAULT 0,
                 replacement_product_url TEXT,
                 details_scraped INTEGER NOT NULL DEFAULT 0,
@@ -676,6 +699,9 @@ class INCIScraper:
                 cosing_ec TEXT,
                 cosing_chemical_name TEXT,
                 cosing_restrictions TEXT,
+                quick_facts_json TEXT,
+                proof_references_json TEXT,
+                cosing_ph_eur_names_json TEXT,
                 last_checked_at TEXT,
                 last_updated_at TEXT
             );
@@ -685,6 +711,12 @@ class INCIScraper:
                 name TEXT NOT NULL,
                 url TEXT UNIQUE,
                 description TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS frees (
+                id TEXT PRIMARY KEY,
+                tag TEXT NOT NULL UNIQUE,
+                tooltip TEXT
             );
 
             CREATE TABLE IF NOT EXISTS metadata (
@@ -826,14 +858,18 @@ class INCIScraper:
                 cosing_cas TEXT,
                 cosing_ec TEXT,
                 cosing_chemical_name TEXT,
-                cosing_restrictions TEXT
+                cosing_restrictions TEXT,
+                quick_facts_json TEXT,
+                proof_references_json TEXT,
+                cosing_ph_eur_names_json TEXT
             );
             """
         )
         columns = (
             "id, name, url, rating_tag, also_called, function_ids_json, irritancy, "
             "comedogenicity, details_text, cosing_all_functions, cosing_description, "
-            "cosing_cas, cosing_ec, cosing_chemical_name, cosing_restrictions"
+            "cosing_cas, cosing_ec, cosing_chemical_name, cosing_restrictions, "
+            "quick_facts_json, proof_references_json, cosing_ph_eur_names_json"
         )
         self.conn.execute(
             f"INSERT INTO ingredients ({columns}) SELECT {columns} FROM ingredients_backup"
@@ -1312,7 +1348,7 @@ class INCIScraper:
         tooltip_map = self._build_tooltip_index(root)
         ingredients = self._extract_ingredients(product_block, tooltip_map)
         ingredient_functions = self._extract_ingredient_functions(root)
-        highlights = self._extract_highlights(root)
+        highlights = self._extract_highlights(root, tooltip_map)
         discontinued = False
         replacement_url = None
         alert_node = root.find(class_="topalert")
@@ -1360,6 +1396,10 @@ class INCIScraper:
             tooltip_id = node.get("id")
             if tooltip_id:
                 index[tooltip_id] = node
+            for child in node.find_all(predicate=lambda n: bool(n.get("id"))):
+                child_id = child.get("id")
+                if child_id:
+                    index[child_id] = child
         return index
 
     def _extract_ingredients(
@@ -1469,21 +1509,33 @@ class INCIScraper:
             )
         return rows
 
-    def _extract_highlights(self, root: Node) -> ProductHighlights:
+    def _extract_highlights(
+        self, root: Node, tooltip_map: Dict[str, Node]
+    ) -> ProductHighlights:
         """Collect highlight hashtags and ingredient groupings.
 
         Türkçe: Hashtag vurgularını ve bileşen gruplarını toplar.
         """
         section = root.find(id_="ingredlist-highlights-section")
-        hashtags: List[str] = []
+        free_tags: List[FreeTag] = []
         key_entries: List[HighlightEntry] = []
         other_entries: List[HighlightEntry] = []
         if section:
             for node in section.find_all(tag="span"):
                 if node.has_class("hashtag"):
                     text = extract_text(node)
-                    if text:
-                        hashtags.append(text)
+                    if not text:
+                        continue
+                    tooltip_text = None
+                    tooltip_attr = node.get("data-tooltip-content")
+                    if tooltip_attr:
+                        tooltip_id = tooltip_attr.lstrip("#")
+                        tooltip_node = tooltip_map.get(tooltip_id)
+                        if tooltip_node:
+                            tooltip_text = self._normalize_whitespace(
+                                extract_text(tooltip_node)
+                            )
+                    free_tags.append(FreeTag(tag=text, tooltip=tooltip_text))
             for block in section.find_all(tag="div"):
                 if not block.has_class("ingredlist-by-function-block"):
                     continue
@@ -1520,7 +1572,7 @@ class INCIScraper:
                         )
                     )
         return ProductHighlights(
-            hashtags=hashtags,
+            free_tags=free_tags,
             key_ingredients=key_entries,
             other_ingredients=other_entries,
         )
@@ -1539,65 +1591,21 @@ class INCIScraper:
         Türkçe: Ayrıştırılan ürün detaylarını ve bileşen ilişkilerini kaydeder.
         """
         ingredient_ids: List[str] = []
-        ingredient_refs: List[Dict[str, object]] = []
         for ingredient in details.ingredients:
             ingredient_id = self._ensure_ingredient(ingredient)
             ingredient.ingredient_id = ingredient_id
             ingredient_ids.append(ingredient_id)
-            ingredient_refs.append(
-                {
-                    "id": ingredient_id,
-                    "name": ingredient.name,
-                    "url": ingredient.url,
-                    "tooltip_text": ingredient.tooltip_text,
-                    "tooltip_ingredient_link": ingredient.tooltip_ingredient_link,
-                }
-            )
         ingredient_ids_json = json.dumps(
             ingredient_ids,
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        ingredient_refs_json = json.dumps(
-            ingredient_refs,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        ingredient_functions_json = json.dumps(
-            [
-                {
-                    "ingredient_name": row.ingredient_name,
-                    "ingredient_page": row.ingredient_page,
-                    "what_it_does": row.what_it_does,
-                    "function_links": row.function_links,
-                }
-                for row in details.ingredient_functions
-            ],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        highlights_json = json.dumps(
-            {
-                "hashtags": details.highlights.hashtags,
-                "key_ingredients": [
-                    {
-                        "function_name": entry.function_name,
-                        "function_link": entry.function_link,
-                        "ingredient_name": entry.ingredient_name,
-                        "ingredient_page": entry.ingredient_page,
-                    }
-                    for entry in details.highlights.key_ingredients
-                ],
-                "other_ingredients": [
-                    {
-                        "function_name": entry.function_name,
-                        "function_link": entry.function_link,
-                        "ingredient_name": entry.ingredient_name,
-                        "ingredient_page": entry.ingredient_page,
-                    }
-                    for entry in details.highlights.other_ingredients
-                ],
-            },
+        free_tag_ids: List[str] = []
+        for tag in details.highlights.free_tags:
+            tag_id = self._ensure_free_tag(tag)
+            free_tag_ids.append(tag_id)
+        free_tag_ids_json = json.dumps(
+            free_tag_ids,
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -1606,17 +1614,14 @@ class INCIScraper:
             "description": details.description,
             "image_path": image_path,
             "ingredient_ids_json": ingredient_ids_json,
-            "ingredient_references_json": ingredient_refs_json,
-            "ingredient_functions_json": ingredient_functions_json,
-            "highlights_json": highlights_json,
+            "free_tag_ids_json": free_tag_ids_json,
             "discontinued": 1 if details.discontinued else 0,
             "replacement_product_url": details.replacement_product_url,
         }
         existing = self.conn.execute(
             """
             SELECT name, description, image_path, ingredient_ids_json,
-                   ingredient_references_json, ingredient_functions_json,
-                   highlights_json, discontinued, replacement_product_url,
+                   free_tag_ids_json, discontinued, replacement_product_url,
                    last_updated_at
             FROM products
             WHERE id = ?
@@ -1694,6 +1699,45 @@ class INCIScraper:
             return str(row["id"])
         raise RuntimeError(f"Unable to store ingredient {ingredient.url}")
 
+    def _ensure_free_tag(self, free_tag: FreeTag) -> str:
+        """Persist or update a free-form hashtag entry and return its id.
+
+        Türkçe: Hashtag tarzı ifadeyi saklayıp kimliğini döndürür.
+        """
+        row = self.conn.execute(
+            "SELECT id, tooltip FROM frees WHERE tag = ?",
+            (free_tag.tag,),
+        ).fetchone()
+        if row:
+            existing_tooltip = row["tooltip"] or ""
+            new_tooltip = free_tag.tooltip or ""
+            if new_tooltip and new_tooltip != existing_tooltip:
+                self.conn.execute(
+                    "UPDATE frees SET tooltip = ? WHERE id = ?",
+                    (new_tooltip, row["id"]),
+                )
+            return str(row["id"])
+        while True:
+            tag_id = self._generate_id()
+            try:
+                self.conn.execute(
+                    "INSERT INTO frees (id, tag, tooltip) VALUES (?, ?, ?)",
+                    (tag_id, free_tag.tag, free_tag.tooltip),
+                )
+            except sqlite3.IntegrityError as exc:  # pragma: no cover - rare id collision
+                message = str(exc)
+                if "frees.id" in message:
+                    continue
+                if "frees.tag" in message:
+                    row = self.conn.execute(
+                        "SELECT id FROM frees WHERE tag = ?",
+                        (free_tag.tag,),
+                    ).fetchone()
+                    if row:
+                        return str(row["id"])
+                raise
+            return tag_id
+
     # ------------------------------------------------------------------
     # Ingredient scraping & persistence
     # ------------------------------------------------------------------
@@ -1727,6 +1771,9 @@ class INCIScraper:
         functions = self._parse_ingredient_functions(what_it_does_nodes)
         cosing = self._parse_cosing_section(root)
         details_text = self._parse_details_text(root)
+        quick_facts = self._parse_quick_facts(root)
+        proof_references = self._parse_proof_references(root)
+        ph_eur_names = self._split_multi_value_field(cosing["ph_eur_name"])
         return IngredientDetails(
             name=name,
             url=url,
@@ -1742,6 +1789,9 @@ class INCIScraper:
             cosing_ec=cosing["ec_number"],
             cosing_chemical_name=cosing["chemical_iupac_name"],
             cosing_restrictions=cosing["cosmetic_restrictions"],
+            quick_facts=quick_facts,
+            proof_references=proof_references,
+            cosing_ph_eur_names=ph_eur_names,
         )
 
     def _build_label_map(self, root: Node) -> Dict[str, Node]:
@@ -1828,6 +1878,7 @@ class INCIScraper:
             "ec_number": "",
             "chemical_iupac_name": "",
             "cosmetic_restrictions": "",
+            "ph_eur_name": "",
         }
         if not section:
             return empty
@@ -1838,6 +1889,7 @@ class INCIScraper:
             "ec #": "ec_number",
             "chemical/iupac name": "chemical_iupac_name",
             "cosmetic restrictions": "cosmetic_restrictions",
+            "ph. eur. name": "ph_eur_name",
         }
         values: Dict[str, str] = dict(empty)
         for bold in section.find_all(tag="b"):
@@ -1915,15 +1967,82 @@ class INCIScraper:
         if not section:
             return ""
         content_node = section.find(class_="content") or section
-        paragraphs: List[str] = []
-        for paragraph in content_node.find_all(tag="p"):
-            text = self._normalize_whitespace(extract_text(paragraph))
-            if text:
-                paragraphs.append(text)
-        if not paragraphs:
+        blocks: List[str] = []
+
+        def visit(node: Node) -> None:
+            for item in node.content:
+                if isinstance(item, str):
+                    text = self._normalize_whitespace(item)
+                    if text:
+                        blocks.append(text)
+                    continue
+                if not isinstance(item, Node):
+                    continue
+                if item.tag == "p":
+                    text = self._normalize_whitespace(extract_text(item))
+                    if text:
+                        blocks.append(text)
+                    continue
+                if item.tag in {"ul", "ol"}:
+                    entries: List[str] = []
+                    for child in item.children:
+                        if isinstance(child, Node) and child.tag == "li":
+                            text = self._normalize_whitespace(extract_text(child))
+                            if text:
+                                entries.append(f"- {text}")
+                    if entries:
+                        blocks.append("\n".join(entries))
+                    continue
+                visit(item)
+
+        visit(content_node)
+        if not blocks:
             text = self._normalize_whitespace(extract_text(content_node))
             return text
-        return "\n\n".join(paragraphs)
+        return "\n\n".join(blocks)
+
+    def _parse_quick_facts(self, root: Node) -> List[str]:
+        """Return the bullet point quick facts section as a list of strings.
+
+        Türkçe: "Quick Facts" bölümündeki madde işaretli metinleri liste olarak döndürür.
+        """
+        section = root.find(id_="quickfacts")
+        if not section:
+            return []
+        facts: List[str] = []
+        for item in section.find_all(tag="li"):
+            text = self._normalize_whitespace(extract_text(item))
+            if text:
+                facts.append(text)
+        return facts
+
+    def _parse_proof_references(self, root: Node) -> List[str]:
+        """Collect the bibliography style entries from the proof section.
+
+        Türkçe: "Show me some proof" bölümündeki kaynakları liste hâlinde toplar.
+        """
+        section = root.find(id_="proof")
+        if not section:
+            return []
+        references: List[str] = []
+        for item in section.find_all(tag="li"):
+            text = self._normalize_whitespace(extract_text(item))
+            if text:
+                references.append(text)
+        return references
+
+    def _split_multi_value_field(self, value: str) -> List[str]:
+        """Normalise comma separated field values to a list.
+
+        Türkçe: Virgülle ayrılmış alan değerlerini liste olarak döndürür.
+        """
+        if not value:
+            return []
+        parts = [
+            self._normalize_whitespace(part)
+            for part in re.split(r"[,;]", value)
+        ]
+        return [part for part in parts if part]
 
     def _store_ingredient_details(self, details: IngredientDetails) -> str:
         """Persist ingredient metadata and return the database identifier.
@@ -1953,13 +2072,29 @@ class INCIScraper:
             "cosing_ec": details.cosing_ec,
             "cosing_chemical_name": details.cosing_chemical_name,
             "cosing_restrictions": details.cosing_restrictions,
+            "quick_facts_json": json.dumps(
+                details.quick_facts,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "proof_references_json": json.dumps(
+                details.proof_references,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "cosing_ph_eur_names_json": json.dumps(
+                details.cosing_ph_eur_names,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
         }
         existing = self.conn.execute(
             """
             SELECT id, name, rating_tag, also_called, function_ids_json,
                    irritancy, comedogenicity, details_text, cosing_all_functions,
                    cosing_description, cosing_cas, cosing_ec, cosing_chemical_name,
-                   cosing_restrictions, last_updated_at
+                   cosing_restrictions, quick_facts_json, proof_references_json,
+                   cosing_ph_eur_names_json, last_updated_at
             FROM ingredients
             WHERE url = ?
             """,
@@ -1977,8 +2112,9 @@ class INCIScraper:
                             id, name, url, rating_tag, also_called, function_ids_json,
                             irritancy, comedogenicity, details_text, cosing_all_functions,
                             cosing_description, cosing_cas, cosing_ec, cosing_chemical_name,
-                            cosing_restrictions, last_checked_at, last_updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            cosing_restrictions, quick_facts_json, proof_references_json,
+                            cosing_ph_eur_names_json, last_checked_at, last_updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             ingredient_id,
@@ -1996,6 +2132,9 @@ class INCIScraper:
                             details.cosing_ec,
                             details.cosing_chemical_name,
                             details.cosing_restrictions,
+                            payload["quick_facts_json"],
+                            payload["proof_references_json"],
+                            payload["cosing_ph_eur_names_json"],
                             now,
                             now,
                         ),
