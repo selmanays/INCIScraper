@@ -2126,12 +2126,12 @@ class INCIScraper:
         """Retrieve CosIng HTML using the headless browser if possible."""
 
         browser = self._get_cosing_browser()
-        if not browser:
-            return None
-        html = browser.fetch(url)
-        if html:
-            return html
-        return None
+        if browser:
+            html = browser.fetch(url)
+            if html:
+                return html
+        # Fall back to the standard HTTP fetch when Playwright is unavailable or fails.
+        return self._fetch_html(url)
 
     def _retrieve_cosing_data(self, ingredient_name: str) -> CosIngRecord:
         """Fetch CosIng data for ``ingredient_name`` from the official portal."""

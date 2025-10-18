@@ -51,11 +51,12 @@ scraper sunar.
 - (Opsiyonel) Görsel sıkıştırma için [`Pillow`](https://python-pillow.org/).
   Kurulmaması durumunda scraper görselleri orijinal biçimleriyle kaydeder.
 - Dış ağ erişimi (gerçek veri toplamak için gereklidir).
-- CosIng verilerini alabilmek için [`playwright`](https://playwright.dev/python/)
-  ve Chromium tarayıcısı. Playwright kurulumunun ardından `playwright install
-  chromium` komutunu çalıştırmanız ve Linux sistemlerde eksik olabilecek
-  bağımlılıkları `playwright install-deps` (veya listelenen paketleri `apt`
-  aracılığıyla) yüklemeniz gerekir.
+- CosIng verilerini eksiksiz alabilmek için [`playwright`](https://playwright.dev/python/)
+  ve Chromium tarayıcısı tavsiye edilir. Playwright kurulumunun ardından
+  `playwright install chromium` komutunu çalıştırmanız ve Linux sistemlerde eksik
+  olabilecek bağımlılıkları `playwright install-deps` (veya listelenen paketleri
+  `apt` aracılığıyla) yüklemeniz gerekir. Playwright mevcut değilse scraper
+  otomatik olarak HTTP tabanlı yedek yönteme döner.
 
 ## Kurulum
 
