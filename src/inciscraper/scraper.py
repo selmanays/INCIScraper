@@ -33,12 +33,24 @@ import socket
 import sqlite3
 import ssl
 import time
+import unicodedata
 from datetime import datetime, timezone
 from io import BytesIO
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 from urllib import error, parse, request
+
+try:  # pragma: no cover - optional dependency for dynamic CosIng pages
+    from playwright.sync_api import (
+        Error as PlaywrightError,
+        TimeoutError as PlaywrightTimeoutError,
+        sync_playwright,
+    )
+except ModuleNotFoundError:  # pragma: no cover - playwright not installed
+    PlaywrightError = Exception  # type: ignore[assignment]
+    PlaywrightTimeoutError = Exception  # type: ignore[assignment]
+    sync_playwright = None  # type: ignore[assignment]
 
 try:
     from PIL import Image, ImageFile
@@ -51,13 +63,11 @@ from .parser import Node, extract_text, parse_html
 LOGGER = logging.getLogger(__name__)
 
 BASE_URL = "https://incidecoder.com"
+COSING_BASE_URL = "https://ec.europa.eu/growth/tools-databases/cosing"
 USER_AGENT = "INCIScraper/1.0 (+https://incidecoder.com)"
 DEFAULT_TIMEOUT = 30
 REQUEST_SLEEP = 0.5  # polite delay between HTTP requests
 PROGRESS_LOG_INTERVAL = 10
-
-CAS_NUMBER_RE = re.compile(r"\b\d{2,7}-\d{2}-\d\b")
-EC_NUMBER_RE = re.compile(r"\b\d{3}-\d{3}-\d\b")
 
 EXPECTED_SCHEMA: Dict[str, Set[str]] = {
     "brands": {
@@ -91,19 +101,16 @@ EXPECTED_SCHEMA: Dict[str, Set[str]] = {
         "url",
         "rating_tag",
         "also_called",
-        "function_ids_json",
         "irritancy",
         "comedogenicity",
         "details_text",
-        "cosing_all_functions",
-        "cosing_description",
-        "cosing_cas",
-        "cosing_ec",
-        "cosing_chemical_name",
-        "cosing_restrictions",
+        "cosing_cas_numbers_json",
+        "cosing_ec_numbers_json",
+        "cosing_identified_ingredients_json",
+        "cosing_regulation_provisions_json",
+        "cosing_function_ids_json",
         "quick_facts_json",
         "proof_references_json",
-        "cosing_ph_eur_names_json",
         "last_checked_at",
         "last_updated_at",
     },
@@ -136,12 +143,156 @@ ADDITIONAL_COLUMN_DEFINITIONS: Dict[str, Dict[str, str]] = {
     "ingredients": {
         "last_checked_at": "last_checked_at TEXT",
         "last_updated_at": "last_updated_at TEXT",
+        "cosing_cas_numbers_json": "cosing_cas_numbers_json TEXT",
+        "cosing_ec_numbers_json": "cosing_ec_numbers_json TEXT",
+        "cosing_identified_ingredients_json": "cosing_identified_ingredients_json TEXT",
+        "cosing_regulation_provisions_json": "cosing_regulation_provisions_json TEXT",
+        "cosing_function_ids_json": "cosing_function_ids_json TEXT",
         "quick_facts_json": "quick_facts_json TEXT",
         "proof_references_json": "proof_references_json TEXT",
-        "cosing_ph_eur_names_json": "cosing_ph_eur_names_json TEXT",
     },
 }
 
+
+class _CosIngBrowser:
+    """Headless Chromium helper that renders CosIng pages with JavaScript."""
+
+    def __init__(self, *, timeout: int) -> None:
+        self._timeout_ms = max(int(timeout * 1000), 1000)
+        self._playwright_manager = None
+        self._playwright_manager_entered = False
+        self._browser = None
+        self._context = None
+        self._page = None
+        self._available = False
+        self._start()
+
+    @property
+    def is_available(self) -> bool:
+        """Return whether the browser session is ready for navigation."""
+
+        return self._available and self._page is not None
+
+    def fetch(self, url: str) -> Optional[str]:
+        """Navigate to ``url`` and return the rendered HTML."""
+
+        if not self.is_available:
+            return None
+        try:
+            assert self._page is not None  # narrow type for mypy
+            self._page.goto(url, wait_until="networkidle", timeout=self._timeout_ms)
+            self._dismiss_cookie_banner()
+            self._wait_for_cos_ing_ready(url)
+            return self._page.content()
+        except PlaywrightTimeoutError as exc:  # pragma: no cover - network timing
+            LOGGER.warning("Timed out while rendering CosIng page %s: %s", url, exc)
+        except PlaywrightError as exc:  # pragma: no cover - runtime dependent
+            LOGGER.warning("Playwright failed to render CosIng page %s: %s", url, exc)
+            self._reset()
+        except Exception as exc:  # pragma: no cover - defensive
+            LOGGER.warning("Unexpected error while rendering CosIng page %s: %s", url, exc)
+            self._reset()
+        return None
+
+    def close(self) -> None:
+        """Dispose the browser session and underlying Playwright runtime."""
+
+        if self._page is not None:
+            try:
+                self._page.close()
+            except PlaywrightError:  # pragma: no cover - best effort cleanup
+                pass
+            self._page = None
+        if self._context is not None:
+            try:
+                self._context.close()
+            except PlaywrightError:  # pragma: no cover - best effort cleanup
+                pass
+            self._context = None
+        if self._browser is not None:
+            try:
+                self._browser.close()
+            except PlaywrightError:  # pragma: no cover - best effort cleanup
+                pass
+            self._browser = None
+        if self._playwright_manager is not None and self._playwright_manager_entered:
+            try:
+                self._playwright_manager.__exit__(None, None, None)
+            except Exception:  # pragma: no cover - best effort cleanup
+                pass
+        self._playwright_manager = None
+        self._playwright_manager_entered = False
+        self._available = False
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+    def _start(self) -> None:
+        if sync_playwright is None:
+            LOGGER.warning(
+                "Playwright is not installed – CosIng pages requiring JavaScript "
+                "cannot be rendered."
+            )
+            return
+        try:
+            self._playwright_manager = sync_playwright()
+            playwright_instance = self._playwright_manager.__enter__()
+            self._playwright_manager_entered = True
+            browser_type = playwright_instance.chromium
+            self._browser = browser_type.launch(headless=True)
+            self._context = self._browser.new_context(user_agent=USER_AGENT)
+            self._page = self._context.new_page()
+            self._available = True
+        except PlaywrightError as exc:  # pragma: no cover - runtime dependent
+            LOGGER.warning("Unable to start Chromium for CosIng scraping: %s", exc)
+            self.close()
+        except Exception as exc:  # pragma: no cover - defensive
+            LOGGER.warning("Unexpected error initialising Chromium: %s", exc)
+            self.close()
+
+    def _reset(self) -> None:
+        self.close()
+        self._start()
+
+    def _dismiss_cookie_banner(self) -> None:
+        if not self._page:
+            return
+        selectors = [
+            "button:has-text(\"Accept all\")",
+            "button:has-text(\"Accept All\")",
+            "button:has-text(\"Accept\")",
+            "button:has-text(\"Allow all\")",
+            "button:has-text(\"Allow All\")",
+            "button:has-text(\"I accept\")",
+            "button:has-text(\"I agree\")",
+            "#cookie-consent-banner button",
+        ]
+        for selector in selectors:
+            try:
+                locator = self._page.locator(selector)
+                locator.wait_for(state="visible", timeout=2000)
+                locator.first.click(timeout=2000)
+                self._page.wait_for_timeout(200)
+                break
+            except PlaywrightTimeoutError:
+                continue
+            except PlaywrightError:
+                continue
+
+    def _wait_for_cos_ing_ready(self, url: str) -> None:
+        if not self._page:
+            return
+        selectors: List[str] = []
+        if "/search" in url:
+            selectors = ["app-results-subs table", "table.ecl-table"]
+        elif "/details" in url:
+            selectors = ["app-details-subs table", "table.ecl-table"]
+        for selector in selectors:
+            try:
+                self._page.wait_for_selector(selector, state="attached", timeout=5000)
+                return
+            except PlaywrightTimeoutError:
+                continue
 
 @dataclass
 class IngredientReference:
@@ -166,6 +317,17 @@ class IngredientFunction:
     ingredient_page: Optional[str]
     what_it_does: List[str]
     function_links: List[str]
+
+
+@dataclass
+class CosIngRecord:
+    """Structured data retrieved from the CosIng public database."""
+
+    cas_numbers: List[str] = field(default_factory=list)
+    ec_numbers: List[str] = field(default_factory=list)
+    identified_ingredients: List[str] = field(default_factory=list)
+    regulation_provisions: List[str] = field(default_factory=list)
+    functions: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -229,19 +391,16 @@ class IngredientDetails:
     url: str
     rating_tag: str
     also_called: str
-    functions: List["IngredientFunctionInfo"]
     irritancy: str
     comedogenicity: str
     details_text: str
-    cosing_all_functions: str
-    cosing_description: str
-    cosing_cas: List[str]
-    cosing_ec: List[str]
-    cosing_chemical_name: List[str]
-    cosing_restrictions: str
+    cosing_cas_numbers: List[str]
+    cosing_ec_numbers: List[str]
+    cosing_identified_ingredients: List[str]
+    cosing_regulation_provisions: List[str]
+    cosing_function_infos: List["IngredientFunctionInfo"]
     quick_facts: List[str]
     proof_references: List[str]
-    cosing_ph_eur_names: List[str]
 
 
 @dataclass
@@ -282,13 +441,14 @@ class INCIScraper:
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self._init_db()
-        self._function_description_cache: Dict[str, str] = {}
         self._host_failover: Dict[str, str] = {}
         self._host_ip_overrides: Dict[str, str] = {}
         self._host_alternatives = self._build_host_alternatives(
             self.base_url, alternate_base_urls or []
         )
         self._ssl_context = ssl.create_default_context()
+        self._cosing_browser: Optional[_CosIngBrowser] = None
+        self._cosing_browser_unavailable = False
 
     @staticmethod
     def _generate_id() -> str:
@@ -651,6 +811,9 @@ class INCIScraper:
 
         Türkçe: Kullanılan SQLite bağlantısını kapatır.
         """
+        if self._cosing_browser is not None:
+            self._cosing_browser.close()
+            self._cosing_browser = None
         self.conn.close()
 
     # ------------------------------------------------------------------
@@ -698,19 +861,16 @@ class INCIScraper:
                 url TEXT NOT NULL UNIQUE,
                 rating_tag TEXT,
                 also_called TEXT,
-                function_ids_json TEXT,
+                cosing_function_ids_json TEXT,
                 irritancy TEXT,
                 comedogenicity TEXT,
                 details_text LONGTEXT,
-                cosing_all_functions TEXT,
-                cosing_description TEXT,
-                cosing_cas TEXT,
-                cosing_ec TEXT,
-                cosing_chemical_name TEXT,
-                cosing_restrictions TEXT,
+                cosing_cas_numbers_json TEXT,
+                cosing_ec_numbers_json TEXT,
+                cosing_identified_ingredients_json TEXT,
+                cosing_regulation_provisions_json TEXT,
                 quick_facts_json TEXT,
                 proof_references_json TEXT,
-                cosing_ph_eur_names_json TEXT,
                 last_checked_at TEXT,
                 last_updated_at TEXT
             );
@@ -858,29 +1018,26 @@ class INCIScraper:
                 url TEXT NOT NULL UNIQUE,
                 rating_tag TEXT,
                 also_called TEXT,
-                function_ids_json TEXT,
+                cosing_function_ids_json TEXT,
                 irritancy TEXT,
                 comedogenicity TEXT,
                 details_text LONGTEXT,
-                cosing_all_functions TEXT,
-                cosing_description TEXT,
-                cosing_cas TEXT,
-                cosing_ec TEXT,
-                cosing_chemical_name TEXT,
-                cosing_restrictions TEXT,
+                cosing_cas_numbers_json TEXT,
+                cosing_ec_numbers_json TEXT,
+                cosing_identified_ingredients_json TEXT,
+                cosing_regulation_provisions_json TEXT,
                 quick_facts_json TEXT,
                 proof_references_json TEXT,
-                cosing_ph_eur_names_json TEXT,
                 last_checked_at TEXT,
                 last_updated_at TEXT
             );
             """
         )
         columns = (
-            "id, name, url, rating_tag, also_called, function_ids_json, irritancy, "
-            "comedogenicity, details_text, cosing_all_functions, cosing_description, "
-            "cosing_cas, cosing_ec, cosing_chemical_name, cosing_restrictions, "
-            "quick_facts_json, proof_references_json, cosing_ph_eur_names_json, "
+            "id, name, url, rating_tag, also_called, cosing_function_ids_json, irritancy, "
+            "comedogenicity, details_text, cosing_cas_numbers_json, cosing_ec_numbers_json, "
+            "cosing_identified_ingredients_json, cosing_regulation_provisions_json, "
+            "quick_facts_json, proof_references_json, "
             "last_checked_at, last_updated_at"
         )
         self.conn.execute(
@@ -1819,39 +1976,299 @@ class INCIScraper:
         rating_tag = extract_text(rating_node)
         label_map = self._build_label_map(root)
         also_called_node = label_map.get("also-called-like-this")
-        what_it_does_nodes = label_map.get("what-it-does")
         irritancy_node = label_map.get("irritancy")
         comedogenicity_node = label_map.get("comedogenicity")
-        functions = self._parse_ingredient_functions(what_it_does_nodes)
-        cosing = self._parse_cosing_section(root)
-        chemical_names, cas_numbers, ec_numbers = self._normalise_cosing_identifiers(
-            cosing["chemical_iupac_name"],
-            cosing["cas_number"],
-            cosing["ec_number"],
-        )
+        cosing_record = self._retrieve_cosing_data(name)
+        cosing_function_infos = [
+            IngredientFunctionInfo(name=fn, url=None, description="")
+            for fn in cosing_record.functions
+        ]
         details_text = self._parse_details_text(root)
         quick_facts = self._parse_quick_facts(root)
         proof_references = self._parse_proof_references(root)
-        ph_eur_names = self._split_multi_value_field(cosing["ph_eur_name"])
         return IngredientDetails(
             name=name,
             url=url,
             rating_tag=rating_tag,
             also_called=extract_text(also_called_node) if also_called_node else "",
-            functions=functions,
             irritancy=self._extract_label_text(irritancy_node),
             comedogenicity=self._extract_label_text(comedogenicity_node),
             details_text=details_text,
-            cosing_all_functions=cosing["all_functions"],
-            cosing_description=cosing["description"],
-            cosing_cas=cas_numbers,
-            cosing_ec=ec_numbers,
-            cosing_chemical_name=chemical_names,
-            cosing_restrictions=cosing["cosmetic_restrictions"],
+            cosing_cas_numbers=cosing_record.cas_numbers,
+            cosing_ec_numbers=cosing_record.ec_numbers,
+            cosing_identified_ingredients=cosing_record.identified_ingredients,
+            cosing_regulation_provisions=cosing_record.regulation_provisions,
+            cosing_function_infos=cosing_function_infos,
             quick_facts=quick_facts,
             proof_references=proof_references,
-            cosing_ph_eur_names=ph_eur_names,
         )
+
+    def _get_cosing_browser(self) -> Optional[_CosIngBrowser]:
+        """Return a shared Chromium session for CosIng rendering when available."""
+
+        if self._cosing_browser_unavailable:
+            return None
+        if self._cosing_browser is None:
+            browser = _CosIngBrowser(timeout=self.timeout)
+            if not browser.is_available:
+                browser.close()
+                self._cosing_browser_unavailable = True
+                return None
+            self._cosing_browser = browser
+        return self._cosing_browser
+
+    def _fetch_cosing_html(self, url: str) -> Optional[str]:
+        """Retrieve CosIng HTML using the headless browser if possible."""
+
+        browser = self._get_cosing_browser()
+        if not browser:
+            return None
+        html = browser.fetch(url)
+        if html:
+            return html
+        return None
+
+    def _retrieve_cosing_data(self, ingredient_name: str) -> CosIngRecord:
+        """Fetch CosIng data for ``ingredient_name`` from the official portal."""
+
+        ingredient_name = ingredient_name.strip()
+        if not ingredient_name:
+            return CosIngRecord()
+        search_url = f"{COSING_BASE_URL}/search?keyword={parse.quote_plus(ingredient_name)}"
+        search_html = self._fetch_cosing_html(search_url)
+        if not search_html:
+            return CosIngRecord()
+        detail_html = self._ensure_cosing_detail_html(search_html, ingredient_name)
+        if not detail_html:
+            return CosIngRecord()
+        return self._parse_cosing_detail_page(detail_html)
+
+    def _ensure_cosing_detail_html(self, html: str, ingredient_name: str) -> Optional[str]:
+        """Return detail page HTML, following search results when necessary."""
+
+        root = parse_html(html)
+        if self._is_cosing_detail_page(root):
+            return html
+        detail_url = self._select_cosing_result_url(root, ingredient_name)
+        if not detail_url:
+            return None
+        return self._fetch_cosing_html(detail_url)
+
+    def _is_cosing_detail_page(self, root: Node) -> bool:
+        """Determine whether ``root`` already represents a CosIng detail page."""
+
+        for cell in root.find_all(tag="td"):
+            text = self._normalize_whitespace(extract_text(cell)).lower()
+            if text == "inci name":
+                return True
+        return False
+
+    def _select_cosing_result_url(self, root: Node, ingredient_name: str) -> Optional[str]:
+        """Pick the most relevant CosIng search result URL."""
+
+        table = root.find(tag="table")
+        if not table:
+            return None
+        search_name = ingredient_name.strip()
+        if not search_name:
+            return None
+        target_key = self._cosing_lookup_key(search_name)
+        query_words = self._cosing_lookup_words(search_name)
+        best_rank: Tuple[int, int] = (4, 0)
+        best_url: Optional[str] = None
+        for index, anchor in enumerate(table.find_all(tag="a")):
+            href = anchor.get("href")
+            if not href:
+                continue
+            absolute = self._cosing_absolute_url(href)
+            anchor_text = self._normalize_whitespace(extract_text(anchor))
+            if not anchor_text:
+                if best_url is None:
+                    best_rank = (3, index)
+                    best_url = absolute
+                continue
+            anchor_key = self._cosing_lookup_key(anchor_text)
+            row_node = anchor
+            while row_node and row_node.tag != "tr":
+                row_node = row_node.parent
+            row_text = (
+                self._normalize_whitespace(extract_text(row_node))
+                if row_node
+                else anchor_text
+            )
+            row_key = self._cosing_lookup_key(row_text)
+            if anchor_key == target_key or row_key == target_key:
+                return absolute
+            match_type = 3
+            match_score = index
+            if target_key and (
+                target_key in anchor_key or target_key in row_key
+            ):
+                match_type = 1
+                container_length = (
+                    len(anchor_key)
+                    if target_key in anchor_key
+                    else len(row_key)
+                )
+                match_score = max(container_length - len(target_key), 0)
+            else:
+                candidate_scores: List[int] = []
+                anchor_words = self._cosing_lookup_words(anchor_text)
+                if query_words and query_words.issubset(anchor_words):
+                    candidate_scores.append(len(anchor_words) - len(query_words))
+                row_words = self._cosing_lookup_words(row_text)
+                if query_words and query_words.issubset(row_words):
+                    candidate_scores.append(len(row_words) - len(query_words))
+                if candidate_scores:
+                    match_type = 2
+                    match_score = min(candidate_scores)
+            if best_url is None or (match_type, match_score) < best_rank:
+                best_rank = (match_type, match_score)
+                best_url = absolute
+        return best_url
+
+    def _parse_cosing_detail_page(self, html: str) -> CosIngRecord:
+        """Parse the CosIng detail HTML page into a :class:`CosIngRecord`."""
+
+        root = parse_html(html)
+        table_body = root.find(tag="tbody")
+        if not table_body:
+            return CosIngRecord()
+        record = CosIngRecord()
+        for row in table_body.find_all(tag="tr"):
+            cells = [
+                child
+                for child in row.children
+                if isinstance(child, Node) and child.tag == "td"
+            ]
+            if len(cells) < 2:
+                continue
+            label = self._normalize_whitespace(extract_text(cells[0])).lower()
+            value_node = cells[1]
+            if label == "cas #":
+                record.cas_numbers = self._extract_cosing_values(
+                    value_node, split_commas=True
+                )
+            elif label == "ec #":
+                record.ec_numbers = self._extract_cosing_values(
+                    value_node, split_commas=True
+                )
+            elif label.startswith("identified ingredients"):
+                record.identified_ingredients = self._extract_cosing_values(
+                    value_node, split_commas=True
+                )
+            elif label.startswith("cosmetics regulation provisions"):
+                record.regulation_provisions = self._extract_cosing_values(
+                    value_node,
+                    split_commas=False,
+                    split_slashes=False,
+                    split_semicolons=False,
+                )
+                if record.regulation_provisions:
+                    if len(record.regulation_provisions) == 1:
+                        single_value = record.regulation_provisions[0]
+                        if re.fullmatch(r"[A-Z0-9/\s,;-]+", single_value):
+                            parts = [
+                                part.strip()
+                                for part in re.split(
+                                    r"\s+/\s+|,\s*|;\s*",
+                                    single_value,
+                                )
+                                if part.strip()
+                            ]
+                            if parts and len(parts) > 1:
+                                record.regulation_provisions = parts
+            elif label == "functions":
+                record.functions = [
+                    self._normalise_cosing_function_name(value)
+                    for value in self._extract_cosing_values(
+                        value_node, split_commas=True
+                    )
+                ]
+        return record
+
+    def _extract_cosing_values(
+        self,
+        node: Node,
+        *,
+        split_commas: bool = False,
+        split_slashes: bool = True,
+        split_semicolons: bool = True,
+    ) -> List[str]:
+        """Normalise a CosIng table value into a list of strings."""
+
+        items: List[str] = []
+        list_container = node.find(tag="ul")
+        if list_container:
+            for li in list_container.find_all(tag="li"):
+                text = self._normalize_whitespace(extract_text(li))
+                if text:
+                    items.append(text)
+        else:
+            raw_text = self._normalize_whitespace(extract_text(node))
+            if raw_text:
+                pattern_parts: List[str] = []
+                if split_slashes:
+                    pattern_parts.append(r"\s*/\s*")
+                if split_commas:
+                    pattern_parts.append(r",\s*")
+                if split_semicolons:
+                    pattern_parts.append(r";\s*")
+                if pattern_parts:
+                    pattern = "|".join(pattern_parts)
+                    fragments = re.split(pattern, raw_text)
+                else:
+                    fragments = [raw_text]
+                for part in fragments:
+                    value = part.strip()
+                    if value:
+                        items.append(value)
+        unique_items: List[str] = []
+        seen: Set[str] = set()
+        for item in items:
+            key = item.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_items.append(item)
+        return unique_items
+
+    def _normalise_cosing_function_name(self, value: str) -> str:
+        """Return the CosIng function name with each word capitalised."""
+
+        parts = re.split(r"(\W+)", value.strip())
+        normalised: List[str] = []
+        for part in parts:
+            if not part:
+                continue
+            if part.isalpha():
+                normalised.append(part[0].upper() + part[1:].lower())
+            else:
+                normalised.append(part)
+        formatted = "".join(normalised)
+        return formatted or value.strip()
+
+    def _cosing_absolute_url(self, href: str) -> str:
+        """Convert relative CosIng links to absolute URLs."""
+
+        if href.startswith("http://") or href.startswith("https://"):
+            return href
+        base = COSING_BASE_URL if COSING_BASE_URL.endswith("/") else f"{COSING_BASE_URL}/"
+        return parse.urljoin(base, href)
+
+    def _cosing_lookup_key(self, value: str) -> str:
+        """Return a simplified representation suitable for equality checks."""
+
+        normalized = unicodedata.normalize("NFKC", value)
+        simplified = re.sub(r"[^0-9a-z]+", "", normalized.lower())
+        return simplified
+
+    def _cosing_lookup_words(self, value: str) -> Set[str]:
+        """Break a CosIng label into comparable lowercase tokens."""
+
+        normalized = unicodedata.normalize("NFKC", value)
+        tokens = re.split(r"[^0-9a-z]+", normalized.lower())
+        return {token for token in tokens if token}
 
     def _build_label_map(self, root: Node) -> Dict[str, Node]:
         """Associate label slugs with their corresponding value nodes.
@@ -1893,99 +2310,6 @@ class INCIScraper:
         text = extract_text(node)
         return self._normalize_whitespace(text)
 
-    def _parse_ingredient_functions(
-        self, node: Optional[Node]
-    ) -> List[IngredientFunctionInfo]:
-        """Derive ingredient functions from structured or plain text blocks.
-
-        Türkçe: Yapılandırılmış veya düz metin bloklarından bileşen fonksiyonlarını türetir.
-        """
-        if not node:
-            return []
-        functions: List[IngredientFunctionInfo] = []
-        anchors = node.find_all(tag="a")
-        if anchors:
-            for anchor in anchors:
-                name = self._normalize_whitespace(extract_text(anchor))
-                href = anchor.get("href")
-                url = self._absolute_url(href) if href else None
-                description = self._fetch_function_description(url) if url else ""
-                if name or url:
-                    functions.append(
-                        IngredientFunctionInfo(name=name, url=url, description=description)
-                    )
-        else:
-            raw_text = self._normalize_whitespace(extract_text(node))
-            if raw_text:
-                for part in re.split(r",\s*", raw_text):
-                    if part:
-                        functions.append(
-                            IngredientFunctionInfo(name=part, url=None, description="")
-                        )
-        return functions
-
-    def _parse_cosing_section(self, root: Node) -> Dict[str, str]:
-        """Parse the COSING information table into a dictionary.
-
-        Türkçe: COSING bilgi tablosunu sözlüğe dönüştürür.
-        """
-        section = root.find(id_="cosing-data")
-        empty = {
-            "all_functions": "",
-            "description": "",
-            "cas_number": "",
-            "ec_number": "",
-            "chemical_iupac_name": "",
-            "cosmetic_restrictions": "",
-            "ph_eur_name": "",
-        }
-        if not section:
-            return empty
-        key_map = {
-            "all functions": "all_functions",
-            "description": "description",
-            "cas #": "cas_number",
-            "ec #": "ec_number",
-            "chemical/iupac name": "chemical_iupac_name",
-            "cosmetic restrictions": "cosmetic_restrictions",
-            "ph. eur. name": "ph_eur_name",
-        }
-        values: Dict[str, str] = dict(empty)
-        for bold in section.find_all(tag="b"):
-            label = extract_text(bold).strip().lower().strip(":")
-            key = key_map.get(label)
-            if not key:
-                continue
-            text_parts: List[str] = []
-            for item in self._iter_next_content(bold):
-                if isinstance(item, Node) and item.tag == "b":
-                    break
-                if isinstance(item, Node):
-                    text_parts.append(extract_text(item))
-                elif isinstance(item, str):
-                    text_parts.append(item)
-            raw_value = " ".join(part.strip() for part in text_parts if part)
-            cleaned = self._normalize_whitespace(raw_value.replace("|", " "))
-            values[key] = cleaned
-        return values
-
-    def _iter_next_content(self, node: Node) -> Iterable:
-        """Yield sibling content items following ``node``.
-
-        Türkçe: Düğümden sonra gelen kardeş içerik öğelerini sırasıyla döndürür.
-        """
-        parent = node.parent
-        if not parent:
-            return []
-        seen = False
-        for item in parent.content:
-            if item is node:
-                seen = True
-                continue
-            if not seen:
-                continue
-            yield item
-
     def _normalize_whitespace(self, value: str) -> str:
         """Collapse whitespace runs and trim the string.
 
@@ -1994,28 +2318,6 @@ class INCIScraper:
         value = value.strip()
         value = re.sub(r"\s+", " ", value)
         return value
-
-    def _fetch_function_description(self, url: Optional[str]) -> str:
-        """Retrieve the textual description of a cosmetic function.
-
-        Türkçe: Kozmetik fonksiyon tanımının metin içeriğini getirir.
-        """
-        if not url:
-            return ""
-        if url in self._function_description_cache:
-            return self._function_description_cache[url]
-        html = self._fetch_html(url)
-        if not html:
-            self._function_description_cache[url] = ""
-            return ""
-        root = parse_html(html)
-        content = root.find(id_="content") or root.find(class_="content")
-        if content:
-            description = self._normalize_whitespace(extract_text(content))
-        else:
-            description = ""
-        self._function_description_cache[url] = description
-        return description
 
     def _parse_details_text(self, root: Node) -> str:
         """Extract the free-form descriptive text from the ingredient page.
@@ -2108,232 +2410,46 @@ class INCIScraper:
                 references.append(text)
         return references
 
-    def _split_multi_value_field(self, value: str) -> List[str]:
-        """Normalise comma separated field values to a list.
-
-        Türkçe: Virgülle ayrılmış alan değerlerini liste olarak döndürür.
-        """
-        if not value:
-            return []
-
-        parts: List[str] = []
-        current: List[str] = []
-
-        for index, char in enumerate(value):
-            if char in ",;":
-                if char == "," and self._comma_joins_numeric_tokens(value, index):
-                    current.append(char)
-                    continue
-
-                piece = self._normalize_whitespace("".join(current))
-                if piece:
-                    parts.append(piece)
-                current = []
-                continue
-
-            current.append(char)
-
-        tail = self._normalize_whitespace("".join(current))
-        if tail:
-            parts.append(tail)
-
-        return parts
-
-    def _comma_joins_numeric_tokens(self, value: str, index: int) -> bool:
-        """Return ``True`` if a comma links numeric fragments within ``value``."""
-
-        before = value[:index]
-        after = value[index + 1 :]
-
-        prev_match = re.search(r"(\d[\d'\"’”′″]*)\s*$", before)
-        if not prev_match:
-            return False
-
-        next_match = re.match(r"\s*[\d'\"’”′″]+", after)
-        return bool(next_match)
-
-    def _normalise_cosing_identifiers(
-        self,
-        chemical_field: str,
-        cas_field: str,
-        ec_field: str,
-    ) -> Tuple[List[str], List[str], List[str]]:
-        """Extract clean COSING names, CAS and EC numbers.
-
-        Türkçe: COSING isimlerini, CAS ve EC numaralarını temizleyip listeler.
-        """
-
-        chemical_field = chemical_field.replace("“", "").replace("”", "")
-        chemical_field = chemical_field.replace("\"", "")
-        cas_numbers = self._merge_identifier_lists(
-            CAS_NUMBER_RE,
-            self._split_multi_value_field(cas_field),
-            CAS_NUMBER_RE.findall(chemical_field),
-        )
-        ec_numbers = self._merge_identifier_lists(
-            EC_NUMBER_RE,
-            self._split_multi_value_field(ec_field),
-            EC_NUMBER_RE.findall(chemical_field),
-        )
-        split_names = self._split_chemical_names(chemical_field)
-        stripped = self._strip_identifier_annotations(chemical_field)
-        chemical_names = self._split_multi_value_field(stripped)
-        if split_names:
-            chemical_names = split_names
-        return chemical_names, cas_numbers, ec_numbers
-
-    def _strip_identifier_annotations(self, value: str) -> str:
-        """Remove inline CAS/EC fragments from ``value``.
-
-        Türkçe: Metin içerisindeki CAS/EC açıklamalarını temizler.
-        """
-
-        def replace_parenthetical(match: re.Match[str]) -> str:
-            inner = match.group(1)
-            if re.search(r"\b(?:cas|ec)\b", inner, flags=re.IGNORECASE):
-                return " "
-            return match.group(0)
-
-        cleaned = re.sub(r"\(([^()]*)\)", replace_parenthetical, value)
-        cleaned = re.sub(
-            r"\bcas(?:\s*(?:no\.?|#))?\s*[:#-]?\s*\d{2,7}-\d{2}-\d\b",
-            " ",
-            cleaned,
-            flags=re.IGNORECASE,
-        )
-        cleaned = re.sub(
-            r"\bec(?:\s*(?:no\.?|#))?\s*[:#-]?\s*\d{3}-\d{3}-\d\b",
-            " ",
-            cleaned,
-            flags=re.IGNORECASE,
-        )
-        cleaned = cleaned.replace("/", " ")
-        cleaned = self._normalize_whitespace(cleaned)
-        return cleaned
-
-    def _split_chemical_names(self, value: str) -> Optional[List[str]]:
-        """Split complex chemical name fields into individual entries."""
-
-        if not value:
-            return None
-
-        def clean_fragment(fragment: str) -> str:
-            cleaned = self._strip_identifier_annotations(fragment)
-            return self._normalize_whitespace(cleaned)
-
-        pattern = re.compile(r"\([^()]*?(?:\bcas\b|\bec\b)[^()]*\)", re.IGNORECASE)
-        fragments: List[str] = []
-        cursor = 0
-
-        for match in pattern.finditer(value):
-            chunk = value[cursor : match.start()]
-            cursor = match.end()
-            cleaned = clean_fragment(chunk)
-            if cleaned:
-                fragments.append(cleaned)
-
-        tail = clean_fragment(value[cursor:])
-        if tail:
-            fragments.append(tail)
-
-        if fragments:
-            # ``_strip_identifier_annotations`` already collapses whitespace.
-            # Deduplicate while preserving order to avoid returning duplicate
-            # fragments generated by empty chunks between identifier blocks.
-            seen: Set[str] = set()
-            unique_fragments: List[str] = []
-            for fragment in fragments:
-                if fragment and fragment not in seen:
-                    unique_fragments.append(fragment)
-                    seen.add(fragment)
-            if unique_fragments:
-                return unique_fragments
-
-        line_candidates: List[str] = []
-        for line in re.split(r"[\r\n]+", value):
-            cleaned = clean_fragment(line)
-            if cleaned:
-                line_candidates.append(cleaned)
-
-        if len(line_candidates) > 1:
-            seen_lines: Set[str] = set()
-            unique_lines: List[str] = []
-            for candidate in line_candidates:
-                if candidate not in seen_lines:
-                    unique_lines.append(candidate)
-                    seen_lines.add(candidate)
-            return unique_lines
-
-        return None
-
-    def _merge_identifier_lists(
-        self,
-        pattern: re.Pattern[str],
-        *sources: Iterable[str],
-    ) -> List[str]:
-        """Combine multiple identifier iterables while preserving order.
-
-        Türkçe: Birden fazla numara listesini sıra koruyarak birleştirir.
-        """
-
-        result: List[str] = []
-        seen: Set[str] = set()
-        for source in sources:
-            for raw in source:
-                candidate = raw.strip().strip(",;./\"'()")
-                if not candidate:
-                    continue
-                match = pattern.search(candidate)
-                value = match.group(0) if match else None
-                if not value and pattern.fullmatch(candidate):
-                    value = candidate
-                if not value:
-                    continue
-                if value not in seen:
-                    seen.add(value)
-                    result.append(value)
-        return result
-
     def _store_ingredient_details(self, details: IngredientDetails) -> str:
-        """Persist ingredient metadata and return the database identifier.
+        """Persist ingredient metadata and return the database identifier."""
 
-        Türkçe: Bileşen metadatasını kaydedip veritabanı kimliğini döndürür.
-        """
-        function_ids: List[str] = []
-        for function in details.functions:
+        cosing_function_ids: List[str] = []
+        for function in details.cosing_function_infos:
             function_id = self._ensure_ingredient_function(function)
             if function_id is not None:
-                function_ids.append(function_id)
+                cosing_function_ids.append(function_id)
         payload: Dict[str, object] = {
             "name": details.name,
             "rating_tag": details.rating_tag,
             "also_called": details.also_called,
-            "function_ids_json": json.dumps(
-                function_ids,
+            "cosing_function_ids_json": json.dumps(
+                cosing_function_ids,
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
             "irritancy": details.irritancy,
             "comedogenicity": details.comedogenicity,
             "details_text": details.details_text,
-            "cosing_all_functions": details.cosing_all_functions,
-            "cosing_description": details.cosing_description,
-            "cosing_cas": json.dumps(
-                details.cosing_cas,
+            "cosing_cas_numbers_json": json.dumps(
+                details.cosing_cas_numbers,
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
-            "cosing_ec": json.dumps(
-                details.cosing_ec,
+            "cosing_ec_numbers_json": json.dumps(
+                details.cosing_ec_numbers,
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
-            "cosing_chemical_name": json.dumps(
-                details.cosing_chemical_name,
+            "cosing_identified_ingredients_json": json.dumps(
+                details.cosing_identified_ingredients,
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
-            "cosing_restrictions": details.cosing_restrictions,
+            "cosing_regulation_provisions_json": json.dumps(
+                details.cosing_regulation_provisions,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
             "quick_facts_json": json.dumps(
                 details.quick_facts,
                 ensure_ascii=False,
@@ -2344,19 +2460,14 @@ class INCIScraper:
                 ensure_ascii=False,
                 separators=(",", ":"),
             ),
-            "cosing_ph_eur_names_json": json.dumps(
-                details.cosing_ph_eur_names,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
         }
         existing = self.conn.execute(
             """
-            SELECT id, name, rating_tag, also_called, function_ids_json,
-                   irritancy, comedogenicity, details_text, cosing_all_functions,
-                   cosing_description, cosing_cas, cosing_ec, cosing_chemical_name,
-                   cosing_restrictions, quick_facts_json, proof_references_json,
-                   cosing_ph_eur_names_json, last_updated_at
+            SELECT id, name, rating_tag, also_called, cosing_function_ids_json,
+                   irritancy, comedogenicity, details_text, cosing_cas_numbers_json,
+                   cosing_ec_numbers_json, cosing_identified_ingredients_json,
+                   cosing_regulation_provisions_json, quick_facts_json,
+                   proof_references_json, last_updated_at
             FROM ingredients
             WHERE url = ?
             """,
@@ -2371,12 +2482,12 @@ class INCIScraper:
                     self.conn.execute(
                         """
                         INSERT INTO ingredients (
-                            id, name, url, rating_tag, also_called, function_ids_json,
-                            irritancy, comedogenicity, details_text, cosing_all_functions,
-                            cosing_description, cosing_cas, cosing_ec, cosing_chemical_name,
-                            cosing_restrictions, quick_facts_json, proof_references_json,
-                            cosing_ph_eur_names_json, last_checked_at, last_updated_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            id, name, url, rating_tag, also_called, cosing_function_ids_json,
+                            irritancy, comedogenicity, details_text, cosing_cas_numbers_json,
+                            cosing_ec_numbers_json, cosing_identified_ingredients_json,
+                            cosing_regulation_provisions_json, quick_facts_json,
+                            proof_references_json, last_checked_at, last_updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             ingredient_id,
@@ -2384,19 +2495,16 @@ class INCIScraper:
                             details.url,
                             details.rating_tag,
                             details.also_called,
-                            payload["function_ids_json"],
+                            payload["cosing_function_ids_json"],
                             details.irritancy,
                             details.comedogenicity,
                             details.details_text,
-                            details.cosing_all_functions,
-                            details.cosing_description,
-                            payload["cosing_cas"],
-                            payload["cosing_ec"],
-                            payload["cosing_chemical_name"],
-                            details.cosing_restrictions,
+                            payload["cosing_cas_numbers_json"],
+                            payload["cosing_ec_numbers_json"],
+                            payload["cosing_identified_ingredients_json"],
+                            payload["cosing_regulation_provisions_json"],
                             payload["quick_facts_json"],
                             payload["proof_references_json"],
-                            payload["cosing_ph_eur_names_json"],
                             now,
                             now,
                         ),

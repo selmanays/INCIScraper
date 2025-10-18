@@ -29,11 +29,12 @@ scraper sunar.
 - **Görsel optimizasyonu:** Ürün görselleri indirilip WebP (mümkünse lossless)
   olarak sıkıştırılır; Pillow bulunamazsa orijinal veri saklanır.【F:src/inciscraper/scraper.py†L2408-L2475】
 - **Zengin bileşen içerikleri:** Detay metni paragrafların yanı sıra madde
-  işaretli listeleri de koruyacak biçimde ayrıştırılır; Quick Facts, Show me
-  some proof ve "Ph. Eur. Name" alanları JSON olarak saklanır. COSING bölümünde
-  yanlış formatlanmış kimyasal isimler, CAS ve EC numaraları temizlenir, satır
-  kırıkları veya tek parça hâlindeki karmaşık isimler heuristik olarak ayrı
-  girdilere bölünür ve çoklu değerler JSON dizileri olarak saklanır.【F:src/inciscraper/scraper.py†L627-L905】【F:src/inciscraper/scraper.py†L1815-L1853】【F:src/inciscraper/scraper.py†L2020-L2109】【F:src/inciscraper/scraper.py†L2155-L2267】【F:src/inciscraper/scraper.py†L2297-L2339】
+  işaretli listeleri de koruyacak biçimde ayrıştırılır; Quick Facts ve "Show me
+  some proof" bölümleri JSON olarak saklanır. COSING verileri artık doğrudan
+  Avrupa Komisyonu portalından taranır; CAS/EC numaraları, tanımlanan diğer
+  maddeler ve düzenleyici referanslar temizlenip JSON dizileri şeklinde
+  depolanır, fonksiyonlar ise ayrı bir tabloya büyük harfle başlayan biçimiyle
+  bağlanır.【F:src/inciscraper/scraper.py†L1878-L2013】【F:src/inciscraper/scraper.py†L2068-L2147】【F:src/inciscraper/scraper.py†L2152-L2238】
 - **Vurguları bileşen kayıtlarına bağlama:** "Key Ingredients" ve "Other
   Ingredients" bölümlerinde listelenen öğeler ürünün ana bileşen listesiyle
   eşleştirilir ve sonuçlar JSON formatındaki kimlik listeleri olarak saklanır.【F:src/inciscraper/scraper.py†L1587-L1651】
@@ -49,6 +50,11 @@ scraper sunar.
 - (Opsiyonel) Görsel sıkıştırma için [`Pillow`](https://python-pillow.org/).
   Kurulmaması durumunda scraper görselleri orijinal biçimleriyle kaydeder.
 - Dış ağ erişimi (gerçek veri toplamak için gereklidir).
+- CosIng verilerini alabilmek için [`playwright`](https://playwright.dev/python/)
+  ve Chromium tarayıcısı. Playwright kurulumunun ardından `playwright install
+  chromium` komutunu çalıştırmanız ve Linux sistemlerde eksik olabilecek
+  bağımlılıkları `playwright install-deps` (veya listelenen paketleri `apt`
+  aracılığıyla) yüklemeniz gerekir.
 
 ## Kurulum
 
@@ -57,6 +63,10 @@ python -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 pip install Pillow  # Opsiyonel fakat tavsiye edilir
+pip install playwright
+playwright install chromium
+# Linux'ta sistem bağımlılıkları eksikse aşağıdaki komut gerekebilir:
+# playwright install-deps
 ```
 
 Projeyi paket olarak kullanmak için depo kökünde şu komutu çalıştırabilirsiniz:
@@ -121,10 +131,12 @@ Scraper aşağıdaki tabloları oluşturur ve kontrol eder:
   (`key_ingredient_ids_json`, `other_ingredient_ids_json`), #free etiketlerinin
   kimlikleri (`free_tag_ids_json`) ve detay verilerinin en son ne zaman kontrol
   edildiğine dair damgalar.【F:src/inciscraper/scraper.py†L640-L706】【F:src/inciscraper/scraper.py†L1554-L1637】
-- **ingredients** – Bileşenin derecelendirmesi, "başka adları", resmi COSING
-  bilgileri, Quick Facts / Show me some proof listeleri, Ph. Eur. isimleri ve
-  detay bölümünün metni dahil kapsamlı metrikler ile son kontrol/güncelleme
-  zamanları.【F:src/inciscraper/scraper.py†L662-L705】【F:src/inciscraper/scraper.py†L1955-L2033】
+- **ingredients** – Bileşenin derecelendirmesi, "başka adları", CosIng'den
+  alınan CAS/EC numaraları, tanımlanmış diğer maddeler ve düzenleyici
+  referanslar gibi veriler, Quick Facts / Show me some proof listeleri ve detay
+  bölümünün metni; tümü son kontrol/güncelleme damgalarıyla birlikte saklanır.
+  CosIng fonksiyon kimlikleri ayrıca `ingredient_functions` tablosuna
+  referanslanır.【F:src/inciscraper/scraper.py†L662-L718】【F:src/inciscraper/scraper.py†L1878-L2013】【F:src/inciscraper/scraper.py†L2152-L2238】
 - **frees** – #alcohol-free gibi hashtag tarzı pazarlama iddialarını ve ilgili
   tooltip açıklamalarını saklar; ürünler bu tablodaki kimliklere bağlanır.【F:src/inciscraper/scraper.py†L668-L705】【F:src/inciscraper/scraper.py†L1668-L1708】
 - **metadata** – Kaldığı yerden devam edebilmek için kullanılan yardımcı
