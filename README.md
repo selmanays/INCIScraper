@@ -30,7 +30,10 @@ scraper sunar.
   olarak sıkıştırılır; Pillow bulunamazsa orijinal veri saklanır.【F:src/inciscraper/scraper.py†L2408-L2475】
 - **Zengin bileşen içerikleri:** Detay metni paragrafların yanı sıra madde
   işaretli listeleri de koruyacak biçimde ayrıştırılır; Quick Facts, Show me
-  some proof ve "Ph. Eur. Name" alanları JSON olarak saklanır.【F:src/inciscraper/scraper.py†L627-L905】【F:src/inciscraper/scraper.py†L1908-L2013】【F:src/inciscraper/scraper.py†L1818-L1881】
+  some proof ve "Ph. Eur. Name" alanları JSON olarak saklanır.【F:src/inciscraper/scraper.py†L627-L905】【F:src/inciscraper/scraper.py†L1961-L2013】【F:src/inciscraper/scraper.py†L1818-L1881】
+- **Vurguları bileşen kayıtlarına bağlama:** "Key Ingredients" ve "Other
+  Ingredients" bölümlerinde listelenen öğeler ürünün ana bileşen listesiyle
+  eşleştirilir ve sonuçlar JSON formatındaki kimlik listeleri olarak saklanır.【F:src/inciscraper/scraper.py†L1587-L1651】
 - **Akıllı yeniden tarama:** Varsayılan çalıştırma tüm marka, ürün ve detay
   sayfalarını baştan kontrol eder; içerikte değişiklik yoksa satırlar
   yeniden yazılmaz, yalnızca `last_checked_at` damgaları güncellenir. Değişiklik
@@ -111,9 +114,10 @@ Scraper aşağıdaki tabloları oluşturur ve kontrol eder:
 - **brands** – Marka adı, özgün URL, ürünlerinin işlenip işlenmediğini gösteren
   bayrak ile `last_checked_at`/`last_updated_at` damgaları.
 - **products** – Marka ilişkisi, ürün adı, açıklama, görsel yolu, bileşen
-  kimlikleri (`ingredient_ids_json`), #free etiketlerinin kimlikleri
-  (`free_tag_ids_json`) ve detay verilerinin en son ne zaman kontrol edildiğine
-  dair damgalar.【F:src/inciscraper/scraper.py†L640-L705】【F:src/inciscraper/scraper.py†L1554-L1627】
+  kimlikleri (`ingredient_ids_json`), öne çıkarılan bileşen kimlikleri
+  (`key_ingredient_ids_json`, `other_ingredient_ids_json`), #free etiketlerinin
+  kimlikleri (`free_tag_ids_json`) ve detay verilerinin en son ne zaman kontrol
+  edildiğine dair damgalar.【F:src/inciscraper/scraper.py†L640-L706】【F:src/inciscraper/scraper.py†L1554-L1637】
 - **ingredients** – Bileşenin derecelendirmesi, "başka adları", resmi COSING
   bilgileri, Quick Facts / Show me some proof listeleri, Ph. Eur. isimleri ve
   detay bölümünün metni dahil kapsamlı metrikler ile son kontrol/güncelleme

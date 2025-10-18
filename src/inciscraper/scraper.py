@@ -73,6 +73,8 @@ EXPECTED_SCHEMA: Dict[str, Set[str]] = {
         "description",
         "image_path",
         "ingredient_ids_json",
+        "key_ingredient_ids_json",
+        "other_ingredient_ids_json",
         "free_tag_ids_json",
         "discontinued",
         "replacement_product_url",
@@ -122,6 +124,8 @@ ADDITIONAL_COLUMN_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "last_updated_at": "last_updated_at TEXT",
     },
     "products": {
+        "key_ingredient_ids_json": "key_ingredient_ids_json TEXT",
+        "other_ingredient_ids_json": "other_ingredient_ids_json TEXT",
         "free_tag_ids_json": "free_tag_ids_json TEXT",
         "last_checked_at": "last_checked_at TEXT",
         "last_updated_at": "last_updated_at TEXT",
@@ -675,6 +679,8 @@ class INCIScraper:
                 description TEXT,
                 image_path TEXT,
                 ingredient_ids_json TEXT,
+                key_ingredient_ids_json TEXT,
+                other_ingredient_ids_json TEXT,
                 free_tag_ids_json TEXT,
                 discontinued INTEGER NOT NULL DEFAULT 0,
                 replacement_product_url TEXT,
@@ -1591,12 +1597,51 @@ class INCIScraper:
         Türkçe: Ayrıştırılan ürün detaylarını ve bileşen ilişkilerini kaydeder.
         """
         ingredient_ids: List[str] = []
+        ingredient_lookup_by_url: Dict[str, str] = {}
+        ingredient_lookup_by_name: Dict[str, str] = {}
+
+        def normalise_url(value: str) -> str:
+            return value.rstrip("/").lower()
+
         for ingredient in details.ingredients:
             ingredient_id = self._ensure_ingredient(ingredient)
             ingredient.ingredient_id = ingredient_id
             ingredient_ids.append(ingredient_id)
+            if ingredient.url:
+                ingredient_lookup_by_url[normalise_url(ingredient.url)] = ingredient_id
+            normalized_name = self._normalize_whitespace(ingredient.name).lower()
+            if normalized_name:
+                ingredient_lookup_by_name[normalized_name] = ingredient_id
+
         ingredient_ids_json = json.dumps(
             ingredient_ids,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+        def resolve_highlight_ids(entries: List[HighlightEntry]) -> List[str]:
+            resolved: List[str] = []
+            seen: Set[str] = set()
+            for entry in entries:
+                ingredient_id: Optional[str] = None
+                if entry.ingredient_page:
+                    lookup_key = normalise_url(entry.ingredient_page)
+                    ingredient_id = ingredient_lookup_by_url.get(lookup_key)
+                if not ingredient_id and entry.ingredient_name:
+                    name_key = self._normalize_whitespace(entry.ingredient_name).lower()
+                    ingredient_id = ingredient_lookup_by_name.get(name_key)
+                if ingredient_id and ingredient_id not in seen:
+                    resolved.append(ingredient_id)
+                    seen.add(ingredient_id)
+            return resolved
+
+        key_ingredient_ids_json = json.dumps(
+            resolve_highlight_ids(details.highlights.key_ingredients),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        other_ingredient_ids_json = json.dumps(
+            resolve_highlight_ids(details.highlights.other_ingredients),
             ensure_ascii=False,
             separators=(",", ":"),
         )
@@ -1614,6 +1659,8 @@ class INCIScraper:
             "description": details.description,
             "image_path": image_path,
             "ingredient_ids_json": ingredient_ids_json,
+            "key_ingredient_ids_json": key_ingredient_ids_json,
+            "other_ingredient_ids_json": other_ingredient_ids_json,
             "free_tag_ids_json": free_tag_ids_json,
             "discontinued": 1 if details.discontinued else 0,
             "replacement_product_url": details.replacement_product_url,
@@ -1621,6 +1668,7 @@ class INCIScraper:
         existing = self.conn.execute(
             """
             SELECT name, description, image_path, ingredient_ids_json,
+                   key_ingredient_ids_json, other_ingredient_ids_json,
                    free_tag_ids_json, discontinued, replacement_product_url,
                    last_updated_at
             FROM products
@@ -1963,10 +2011,26 @@ class INCIScraper:
 
         Türkçe: Bileşen sayfasındaki serbest biçimli açıklama metnini çıkarır.
         """
-        section = root.find(id_="showmore-section-details") or root.find(id_="details")
+        section = root.find(id_="showmore-section-details")
+        if not section:
+            section = root.find(
+                predicate=lambda n: n.has_class("showmore-section")
+                and (
+                    (n.get("id") or "").endswith("-details")
+                    or "details" in (n.get("id") or "")
+                )
+            )
+        if not section:
+            section = root.find(id_="details")
         if not section:
             return ""
-        content_node = section.find(class_="content") or section
+        content_node = None
+        for candidate in section.find_all(tag="div"):
+            if candidate.has_class("content") or candidate.has_class("showmore-content"):
+                content_node = candidate
+                break
+        if content_node is None:
+            content_node = section
         blocks: List[str] = []
 
         def visit(node: Node) -> None:
@@ -1982,6 +2046,8 @@ class INCIScraper:
                     text = self._normalize_whitespace(extract_text(item))
                     if text:
                         blocks.append(text)
+                    continue
+                if item.has_class("showmore-link"):
                     continue
                 if item.tag in {"ul", "ol"}:
                     entries: List[str] = []
