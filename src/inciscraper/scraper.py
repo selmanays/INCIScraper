@@ -56,6 +56,9 @@ DEFAULT_TIMEOUT = 30
 REQUEST_SLEEP = 0.5  # polite delay between HTTP requests
 PROGRESS_LOG_INTERVAL = 10
 
+CAS_NUMBER_RE = re.compile(r"\b\d{2,7}-\d{2}-\d\b")
+EC_NUMBER_RE = re.compile(r"\b\d{3}-\d{3}-\d\b")
+
 EXPECTED_SCHEMA: Dict[str, Set[str]] = {
     "brands": {
         "id",
@@ -232,9 +235,9 @@ class IngredientDetails:
     details_text: str
     cosing_all_functions: str
     cosing_description: str
-    cosing_cas: str
-    cosing_ec: str
-    cosing_chemical_name: str
+    cosing_cas: List[str]
+    cosing_ec: List[str]
+    cosing_chemical_name: List[str]
     cosing_restrictions: str
     quick_facts: List[str]
     proof_references: List[str]
@@ -1818,6 +1821,11 @@ class INCIScraper:
         comedogenicity_node = label_map.get("comedogenicity")
         functions = self._parse_ingredient_functions(what_it_does_nodes)
         cosing = self._parse_cosing_section(root)
+        chemical_names, cas_numbers, ec_numbers = self._normalise_cosing_identifiers(
+            cosing["chemical_iupac_name"],
+            cosing["cas_number"],
+            cosing["ec_number"],
+        )
         details_text = self._parse_details_text(root)
         quick_facts = self._parse_quick_facts(root)
         proof_references = self._parse_proof_references(root)
@@ -1833,9 +1841,9 @@ class INCIScraper:
             details_text=details_text,
             cosing_all_functions=cosing["all_functions"],
             cosing_description=cosing["description"],
-            cosing_cas=cosing["cas_number"],
-            cosing_ec=cosing["ec_number"],
-            cosing_chemical_name=cosing["chemical_iupac_name"],
+            cosing_cas=cas_numbers,
+            cosing_ec=ec_numbers,
+            cosing_chemical_name=chemical_names,
             cosing_restrictions=cosing["cosmetic_restrictions"],
             quick_facts=quick_facts,
             proof_references=proof_references,
@@ -2110,6 +2118,90 @@ class INCIScraper:
         ]
         return [part for part in parts if part]
 
+    def _normalise_cosing_identifiers(
+        self,
+        chemical_field: str,
+        cas_field: str,
+        ec_field: str,
+    ) -> Tuple[List[str], List[str], List[str]]:
+        """Extract clean COSING names, CAS and EC numbers.
+
+        Türkçe: COSING isimlerini, CAS ve EC numaralarını temizleyip listeler.
+        """
+
+        chemical_field = chemical_field.replace("“", "").replace("”", "")
+        chemical_field = chemical_field.replace("\"", "")
+        cas_numbers = self._merge_identifier_lists(
+            CAS_NUMBER_RE,
+            self._split_multi_value_field(cas_field),
+            CAS_NUMBER_RE.findall(chemical_field),
+        )
+        ec_numbers = self._merge_identifier_lists(
+            EC_NUMBER_RE,
+            self._split_multi_value_field(ec_field),
+            EC_NUMBER_RE.findall(chemical_field),
+        )
+        stripped = self._strip_identifier_annotations(chemical_field)
+        chemical_names = self._split_multi_value_field(stripped)
+        return chemical_names, cas_numbers, ec_numbers
+
+    def _strip_identifier_annotations(self, value: str) -> str:
+        """Remove inline CAS/EC fragments from ``value``.
+
+        Türkçe: Metin içerisindeki CAS/EC açıklamalarını temizler.
+        """
+
+        def replace_parenthetical(match: re.Match[str]) -> str:
+            inner = match.group(1)
+            if re.search(r"\b(?:cas|ec)\b", inner, flags=re.IGNORECASE):
+                return " "
+            return match.group(0)
+
+        cleaned = re.sub(r"\(([^()]*)\)", replace_parenthetical, value)
+        cleaned = re.sub(
+            r"\bcas(?:\s*(?:no\.?|#))?\s*[:#-]?\s*\d{2,7}-\d{2}-\d\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\bec(?:\s*(?:no\.?|#))?\s*[:#-]?\s*\d{3}-\d{3}-\d\b",
+            " ",
+            cleaned,
+            flags=re.IGNORECASE,
+        )
+        cleaned = cleaned.replace("/", " ")
+        cleaned = self._normalize_whitespace(cleaned)
+        return cleaned
+
+    def _merge_identifier_lists(
+        self,
+        pattern: re.Pattern[str],
+        *sources: Iterable[str],
+    ) -> List[str]:
+        """Combine multiple identifier iterables while preserving order.
+
+        Türkçe: Birden fazla numara listesini sıra koruyarak birleştirir.
+        """
+
+        result: List[str] = []
+        seen: Set[str] = set()
+        for source in sources:
+            for raw in source:
+                candidate = raw.strip().strip(",;./\"'()")
+                if not candidate:
+                    continue
+                match = pattern.search(candidate)
+                value = match.group(0) if match else None
+                if not value and pattern.fullmatch(candidate):
+                    value = candidate
+                if not value:
+                    continue
+                if value not in seen:
+                    seen.add(value)
+                    result.append(value)
+        return result
+
     def _store_ingredient_details(self, details: IngredientDetails) -> str:
         """Persist ingredient metadata and return the database identifier.
 
@@ -2134,9 +2226,21 @@ class INCIScraper:
             "details_text": details.details_text,
             "cosing_all_functions": details.cosing_all_functions,
             "cosing_description": details.cosing_description,
-            "cosing_cas": details.cosing_cas,
-            "cosing_ec": details.cosing_ec,
-            "cosing_chemical_name": details.cosing_chemical_name,
+            "cosing_cas": json.dumps(
+                details.cosing_cas,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "cosing_ec": json.dumps(
+                details.cosing_ec,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "cosing_chemical_name": json.dumps(
+                details.cosing_chemical_name,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
             "cosing_restrictions": details.cosing_restrictions,
             "quick_facts_json": json.dumps(
                 details.quick_facts,
@@ -2194,9 +2298,9 @@ class INCIScraper:
                             details.details_text,
                             details.cosing_all_functions,
                             details.cosing_description,
-                            details.cosing_cas,
-                            details.cosing_ec,
-                            details.cosing_chemical_name,
+                            payload["cosing_cas"],
+                            payload["cosing_ec"],
+                            payload["cosing_chemical_name"],
                             details.cosing_restrictions,
                             payload["quick_facts_json"],
                             payload["proof_references_json"],
