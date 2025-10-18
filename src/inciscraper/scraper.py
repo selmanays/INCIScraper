@@ -153,67 +153,6 @@ ADDITIONAL_COLUMN_DEFINITIONS: Dict[str, Dict[str, str]] = {
     },
 }
 
-INGREDIENT_TABLE_SQL = """
-    CREATE TABLE ingredients (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        url TEXT NOT NULL UNIQUE,
-        rating_tag TEXT,
-        also_called TEXT,
-        cosing_function_ids_json TEXT,
-        irritancy TEXT,
-        comedogenicity TEXT,
-        details_text LONGTEXT,
-        cosing_cas_numbers_json TEXT,
-        cosing_ec_numbers_json TEXT,
-        cosing_identified_ingredients_json TEXT,
-        cosing_regulation_provisions_json TEXT,
-        quick_facts_json TEXT,
-        proof_references_json TEXT,
-        last_checked_at TEXT,
-        last_updated_at TEXT
-    );
-"""
-
-INGREDIENT_COLUMN_SEQUENCE: Tuple[str, ...] = (
-    "id",
-    "name",
-    "url",
-    "rating_tag",
-    "also_called",
-    "cosing_function_ids_json",
-    "irritancy",
-    "comedogenicity",
-    "details_text",
-    "cosing_cas_numbers_json",
-    "cosing_ec_numbers_json",
-    "cosing_identified_ingredients_json",
-    "cosing_regulation_provisions_json",
-    "quick_facts_json",
-    "proof_references_json",
-    "last_checked_at",
-    "last_updated_at",
-)
-
-INGREDIENT_INSERT_COLUMNS = ", ".join(INGREDIENT_COLUMN_SEQUENCE)
-
-LEGACY_INGREDIENT_COLUMN_FALLBACKS: Dict[str, Tuple[str, ...]] = {
-    "cosing_function_ids_json": ("function_ids_json", "cosing_all_functions"),
-    "cosing_cas_numbers_json": ("cosing_cas_numbers",),
-    "cosing_ec_numbers_json": ("cosing_ec_numbers",),
-    "cosing_identified_ingredients_json": ("cosing_identified_ingredients",),
-    "cosing_regulation_provisions_json": ("cosing_regulation_provisions",),
-    "quick_facts_json": ("quick_facts",),
-    "proof_references_json": ("proof_references",),
-    "details_text": ("cosing_description",),
-}
-
-LEGACY_INGREDIENT_COLUMNS = {
-    column
-    for fallbacks in LEGACY_INGREDIENT_COLUMN_FALLBACKS.values()
-    for column in fallbacks
-}
-
 
 class _CosIngBrowser:
     """Headless Chromium helper that renders CosIng pages with JavaScript."""
@@ -1070,17 +1009,39 @@ class INCIScraper:
             "Rebuilding ingredients table to expand details_text capacity (previous type: %s)",
             column_type,
         )
-        self._rebuild_ingredients_table(
-            f"SELECT {INGREDIENT_INSERT_COLUMNS} FROM ingredients_backup"
-        )
-
-    def _rebuild_ingredients_table(self, select_query: str) -> None:
-        """Recreate the ingredients table using ``select_query`` for data copy."""
-
         self.conn.execute("ALTER TABLE ingredients RENAME TO ingredients_backup")
-        self.conn.executescript(INGREDIENT_TABLE_SQL)
+        self.conn.executescript(
+            """
+            CREATE TABLE ingredients (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                url TEXT NOT NULL UNIQUE,
+                rating_tag TEXT,
+                also_called TEXT,
+                cosing_function_ids_json TEXT,
+                irritancy TEXT,
+                comedogenicity TEXT,
+                details_text LONGTEXT,
+                cosing_cas_numbers_json TEXT,
+                cosing_ec_numbers_json TEXT,
+                cosing_identified_ingredients_json TEXT,
+                cosing_regulation_provisions_json TEXT,
+                quick_facts_json TEXT,
+                proof_references_json TEXT,
+                last_checked_at TEXT,
+                last_updated_at TEXT
+            );
+            """
+        )
+        columns = (
+            "id, name, url, rating_tag, also_called, cosing_function_ids_json, irritancy, "
+            "comedogenicity, details_text, cosing_cas_numbers_json, cosing_ec_numbers_json, "
+            "cosing_identified_ingredients_json, cosing_regulation_provisions_json, "
+            "quick_facts_json, proof_references_json, "
+            "last_checked_at, last_updated_at"
+        )
         self.conn.execute(
-            f"INSERT INTO ingredients ({INGREDIENT_INSERT_COLUMNS}) {select_query}"
+            f"INSERT INTO ingredients ({columns}) SELECT {columns} FROM ingredients_backup"
         )
         self.conn.execute("DROP TABLE ingredients_backup")
         self.conn.commit()
@@ -1090,19 +1051,57 @@ class INCIScraper:
     ) -> bool:
         """Handle legacy CosIng columns without dropping existing ingredient data."""
 
-        if not extra_columns <= LEGACY_INGREDIENT_COLUMNS:
+        legacy_fallbacks: Dict[str, Tuple[str, ...]] = {
+            "cosing_function_ids_json": ("function_ids_json", "cosing_all_functions"),
+            "cosing_cas_numbers_json": ("cosing_cas_numbers",),
+            "cosing_ec_numbers_json": ("cosing_ec_numbers",),
+            "cosing_identified_ingredients_json": ("cosing_identified_ingredients",),
+            "cosing_regulation_provisions_json": ("cosing_regulation_provisions",),
+            "quick_facts_json": ("quick_facts",),
+            "proof_references_json": ("proof_references",),
+            "details_text": ("cosing_description",),
+        }
+        legacy_columns = {
+            column
+            for fallbacks in legacy_fallbacks.values()
+            for column in fallbacks
+        }
+        if not extra_columns <= legacy_columns:
             return False
         LOGGER.info(
             "Migrating legacy CosIng columns on ingredients table: %s",
             sorted(extra_columns),
         )
+        column_sequence: Tuple[str, ...] = (
+            "id",
+            "name",
+            "url",
+            "rating_tag",
+            "also_called",
+            "cosing_function_ids_json",
+            "irritancy",
+            "comedogenicity",
+            "details_text",
+            "cosing_cas_numbers_json",
+            "cosing_ec_numbers_json",
+            "cosing_identified_ingredients_json",
+            "cosing_regulation_provisions_json",
+            "quick_facts_json",
+            "proof_references_json",
+            "last_checked_at",
+            "last_updated_at",
+        )
         select_parts: List[str] = []
-        for column in INGREDIENT_COLUMN_SEQUENCE:
-            fallbacks = LEGACY_INGREDIENT_COLUMN_FALLBACKS.get(column, ())
-            candidates = [column]
+        for column in column_sequence:
+            fallbacks = legacy_fallbacks.get(column, ())
+            candidates: List[str] = []
+            if column in actual_columns:
+                candidates.append(column)
             for legacy_column in fallbacks:
                 if legacy_column in actual_columns:
                     candidates.append(legacy_column)
+            if not candidates:
+                candidates.append(column)
             if len(candidates) == 1:
                 expression = candidates[0]
             else:
@@ -1111,9 +1110,41 @@ class INCIScraper:
                 expression = f"{expression} AS {column}"
             select_parts.append(expression)
         select_clause = ", ".join(select_parts)
-        self._rebuild_ingredients_table(
-            f"SELECT {select_clause} FROM ingredients_backup"
+        insert_columns = (
+            "id, name, url, rating_tag, also_called, cosing_function_ids_json, irritancy, "
+            "comedogenicity, details_text, cosing_cas_numbers_json, cosing_ec_numbers_json, "
+            "cosing_identified_ingredients_json, cosing_regulation_provisions_json, "
+            "quick_facts_json, proof_references_json, last_checked_at, last_updated_at"
         )
+        self.conn.execute("ALTER TABLE ingredients RENAME TO ingredients_backup")
+        self.conn.executescript(
+            """
+            CREATE TABLE ingredients (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                url TEXT NOT NULL UNIQUE,
+                rating_tag TEXT,
+                also_called TEXT,
+                cosing_function_ids_json TEXT,
+                irritancy TEXT,
+                comedogenicity TEXT,
+                details_text LONGTEXT,
+                cosing_cas_numbers_json TEXT,
+                cosing_ec_numbers_json TEXT,
+                cosing_identified_ingredients_json TEXT,
+                cosing_regulation_provisions_json TEXT,
+                quick_facts_json TEXT,
+                proof_references_json TEXT,
+                last_checked_at TEXT,
+                last_updated_at TEXT
+            );
+            """
+        )
+        self.conn.execute(
+            f"INSERT INTO ingredients ({insert_columns}) SELECT {select_clause} FROM ingredients_backup"
+        )
+        self.conn.execute("DROP TABLE ingredients_backup")
+        self.conn.commit()
         return True
 
     def _enforce_schema(self) -> None:

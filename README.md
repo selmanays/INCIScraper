@@ -16,7 +16,8 @@ scraper sunar.
   kaldığı yerden devam eder.【F:src/inciscraper/scraper.py†L322-L401】【F:src/inciscraper/scraper.py†L351-L603】
 - **Dayanıklı veritabanı şeması:** Scraper açılışta gerekli tabloları oluşturur,
   eksik sütunları ekler ve beklenmeyen yapıları temizleyerek veri tutarlılığı
-  sağlar.【F:src/inciscraper/scraper.py†L627-L905】
+  sağlar; CosIng alan adları değiştiğinde eski sütunlardaki veriler korunarak
+  yeni JSON sütunlarına taşınır.【F:src/inciscraper/scraper.py†L627-L905】【F:src/inciscraper/scraper.py†L1046-L1198】
 - **Otomatik durum sıfırlama:** Ürün tablosu temizlendiğinde marka
   ``products_scraped`` bayrakları ve ``sqlite_sequence`` sayaçları otomatik
   olarak sıfırlanır; böylece yeniden tarama hatasız başlar.【F:src/inciscraper/scraper.py†L351-L480】【F:src/inciscraper/scraper.py†L734-L812】
