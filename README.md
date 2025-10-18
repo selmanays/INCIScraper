@@ -13,24 +13,29 @@ scraper sunar.
   hashtag öne çıkarmaları vb.) veri tabanına işler.
 - **Kaldığı yerden devam etme:** Çalışma durumu `metadata` tablosunda saklandığı
   için kesilen oturumlar marka, ürün ve ürün detayı adımlarında otomatik olarak
-  kaldığı yerden devam eder.【F:src/inciscraper/scraper.py†L186-L259】【F:src/inciscraper/scraper.py†L309-L392】
+  kaldığı yerden devam eder.【F:src/inciscraper/scraper.py†L322-L401】【F:src/inciscraper/scraper.py†L351-L603】
 - **Dayanıklı veritabanı şeması:** Scraper açılışta gerekli tabloları oluşturur,
   eksik sütunları ekler ve beklenmeyen yapıları temizleyerek veri tutarlılığı
-  sağlar.【F:src/inciscraper/scraper.py†L418-L509】
+  sağlar.【F:src/inciscraper/scraper.py†L627-L905】
 - **Otomatik durum sıfırlama:** Ürün tablosu temizlendiğinde marka
   ``products_scraped`` bayrakları ve ``sqlite_sequence`` sayaçları otomatik
-  olarak sıfırlanır; böylece yeniden tarama hatasız başlar.【F:src/inciscraper/scraper.py†L309-L392】【F:src/inciscraper/scraper.py†L512-L601】
+  olarak sıfırlanır; böylece yeniden tarama hatasız başlar.【F:src/inciscraper/scraper.py†L351-L480】【F:src/inciscraper/scraper.py†L734-L812】
 - **Bağımlılık dostu HTML ayrıştırıcı:** `html.parser` üzerine kurulu özel DOM
   katmanı BeautifulSoup benzeri bir API sunarak ek bağımlılıklara gerek
   bırakmaz.【F:src/inciscraper/parser.py†L1-L159】【F:src/inciscraper/parser.py†L321-L414】
 - **Ağ hatası toleransı:** DNS sorunlarında alternatif alan adlarına geçer,
   DNS-over-HTTPS ile IP çözer ve gerekirse doğrudan IP üzerinden TLS bağlantısı
-  kurar.【F:src/inciscraper/scraper.py†L621-L808】【F:src/inciscraper/scraper.py†L862-L1103】
+  kurar.【F:src/inciscraper/scraper.py†L2066-L2396】
 - **Görsel optimizasyonu:** Ürün görselleri indirilip WebP (mümkünse lossless)
-  olarak sıkıştırılır; Pillow bulunamazsa orijinal veri saklanır.【F:src/inciscraper/scraper.py†L1126-L1230】
+  olarak sıkıştırılır; Pillow bulunamazsa orijinal veri saklanır.【F:src/inciscraper/scraper.py†L2408-L2475】
 - **Uzun bileşen açıklamaları:** `ingredients.details_text` sütunu sınırsız
   uzunlukta metni destekleyecek şekilde otomatik olarak yükseltilir; geçmiş
-  veriler kaybedilmeden yeni içerikler tam hâliyle saklanır.【F:src/inciscraper/scraper.py†L418-L509】【F:src/inciscraper/scraper.py†L509-L685】
+  veriler kaybedilmeden yeni içerikler tam hâliyle saklanır.【F:src/inciscraper/scraper.py†L627-L905】【F:src/inciscraper/scraper.py†L782-L859】
+- **Akıllı yeniden tarama:** Varsayılan çalıştırma tüm marka, ürün ve detay
+  sayfalarını baştan kontrol eder; içerikte değişiklik yoksa satırlar
+  yeniden yazılmaz, yalnızca `last_checked_at` damgaları güncellenir. Değişiklik
+  tespit edildiğinde ise ilgili kayıtlar güncellenip `last_updated_at`
+  güncellenir.【F:main.py†L100-L168】【F:src/inciscraper/scraper.py†L1065-L1293】【F:src/inciscraper/scraper.py†L1520-L1655】【F:src/inciscraper/scraper.py†L1918-L2013】
 
 ## Gereksinimler
 
@@ -65,6 +70,9 @@ python main.py
 
 Scraper başlarken veritabanındaki durumu özetler, ardından eksik adımları
 çalıştırır ve sonunda bağlantıyı kapatır.【F:main.py†L63-L118】
+Varsayılan mod `--no-resume` olduğu için tüm sayfalar her çalıştırmada baştan
+taransa da değişmeyen kayıtlar yeniden yazılmaz; yalnızca son kontrol
+damgaları güncellenir.【F:main.py†L100-L168】【F:src/inciscraper/scraper.py†L1520-L1655】
 
 ### Örnek Veri Tabanı Oluşturma
 
@@ -89,7 +97,7 @@ görsellerle birlikte kaydeder.【F:main.py†L96-L118】【F:src/inciscraper/sc
 | `--alternate-base-url URL` | DNS hatalarında denenecek ek taban URL'ler; birden fazla kez verilebilir. |
 | `--step {all,brands,products,details}` | Pipeline'ın belirli bir bölümünü çalıştırır. |
 | `--max-pages N` | Marka listelemede çekilecek sayfa sayısını sınırlar. |
-| `--resume/--no-resume` | `all` adımı çalışırken tamamlanmış aşamaları atlayıp atlamayacağını belirler. |
+| `--resume/--no-resume` | `all` adımı çalışırken tamamlanmış aşamaları atlayıp atlamayacağını belirler (varsayılan `--no-resume`). |
 | `--log-level LEVEL` | Günlük çıktısının ayrıntı düzeyini ayarlar. |
 | `--sample-data` | Tüm pipeline yerine üç marka × bir ürünlük örnek veritabanı oluşturur (`sample_` öneki eklenir). |
 
@@ -100,34 +108,34 @@ verir.【F:main.py†L55-L69】
 
 Scraper aşağıdaki tabloları oluşturur ve kontrol eder:
 
-- **brands** – Marka adı, özgün URL ve ürünlerinin işlenip işlenmediğini
-  gösteren bayrak.
-- **products** – Marka ilişkisi, ürün adı, açıklama, görsel yolu, öne çıkan
-  içerik fonksiyonları ve detayların tamamlanıp tamamlanmadığı.
+- **brands** – Marka adı, özgün URL, ürünlerinin işlenip işlenmediğini gösteren
+  bayrak ile `last_checked_at`/`last_updated_at` damgaları.
+- **products** – Marka ilişkisi, ürün adı, açıklama, görsel yolu, JSON
+  formatında bileşen referansları (`ingredient_references_json`) ve detay
+  verilerinin en son ne zaman kontrol edildiğine dair damgalar.
 - **ingredients** – Bileşenin derecelendirmesi, "başka adları", resmi COSING
-  bilgileri ve detay bölümünün HTML içeriği dahil kapsamlı metrikler.
-- **product_ingredients** – Ürün ile bileşenler arasındaki çoktan çoğa ilişki ve
-  tooltip metinleri.
+  bilgileri ve detay bölümünün HTML içeriği dahil kapsamlı metrikler ile son
+  kontrol/güncelleme zamanları.
 - **metadata** – Kaldığı yerden devam edebilmek için kullanılan yardımcı
   anahtar/değer deposu.
 
 Schema ve kolonlar uygulama tarafından doğrulanır; beklenmeyen tablo veya
-sütunlar tespit edilirse kaldırılır.【F:src/inciscraper/scraper.py†L418-L509】
+sütunlar tespit edilirse kaldırılır.【F:src/inciscraper/scraper.py†L627-L905】
 
 ## Nasıl Çalışır?
 
 1. **Markalar:** `/brands` sayfalarındaki bağlantıları tarar, marka adlarını ve
    URL'lerini kaydeder. Sayfa sayısı bilinmiyorsa metadata kayıtları ile takip
-   edilir.【F:src/inciscraper/scraper.py†L219-L309】【F:src/inciscraper/scraper.py†L512-L601】
+   edilir.【F:src/inciscraper/scraper.py†L351-L480】【F:src/inciscraper/scraper.py†L322-L401】
 2. **Ürünler:** Her marka için paginasyonlu ürün listelerini dolaşır, hata
    durumlarında alternatif URL denemeleri yapar ve yeni ürünleri ekler veya
-   isimleri günceller.【F:src/inciscraper/scraper.py†L262-L392】【F:src/inciscraper/scraper.py†L602-L685】
+   isimleri günceller.【F:src/inciscraper/scraper.py†L481-L603】
 3. **Ürün Detayları:** Ürün sayfalarını indirir, bileşen listelerini, fonksiyon
    tablolarını, hashtag öne çıkanlarını ve varsa "discontinued" uyarılarını
-   ayrıştırır; ardından görselleri indirip optimize eder.【F:src/inciscraper/scraper.py†L392-L417】【F:src/inciscraper/scraper.py†L685-L1125】
+   ayrıştırır; ardından görselleri indirip optimize eder.【F:src/inciscraper/scraper.py†L1298-L1655】【F:src/inciscraper/scraper.py†L2408-L2475】
 4. **Bileşen Detayları:** Ürünlerde görülen her bileşenin kendi sayfasını
    ziyaret eder, derecelendirme bilgilerini ve COSING bölümünü çıkarır, ilgili
-   bağlantıları normalize eder.【F:src/inciscraper/scraper.py†L996-L1099】
+   bağlantıları normalize eder.【F:src/inciscraper/scraper.py†L1918-L2013】
 
 Bu adımların tümü idempotent olduğundan scraper'ı tekrar çalıştırmak veri
 tekrarı oluşturmaz.
