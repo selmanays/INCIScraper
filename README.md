@@ -10,7 +10,7 @@ scraper sunar.
 
 - **Üç aşamalı pipeline:** Markaları listeleyip kaydeder, her marka için ürün
   sayfalarını dolaşır ve ürün detaylarını (tanım, bileşen listeleri, görseller,
-  hashtag öne çıkarmaları vb.) veri tabanına işler.
+  #free iddiaları ve kilit bileşen vurguları vb.) veri tabanına işler.【F:src/inciscraper/scraper.py†L1298-L1345】【F:src/inciscraper/scraper.py†L1504-L1579】
 - **Kaldığı yerden devam etme:** Çalışma durumu `metadata` tablosunda saklandığı
   için kesilen oturumlar marka, ürün ve ürün detayı adımlarında otomatik olarak
   kaldığı yerden devam eder.【F:src/inciscraper/scraper.py†L322-L401】【F:src/inciscraper/scraper.py†L351-L603】
@@ -28,9 +28,9 @@ scraper sunar.
   kurar.【F:src/inciscraper/scraper.py†L2066-L2396】
 - **Görsel optimizasyonu:** Ürün görselleri indirilip WebP (mümkünse lossless)
   olarak sıkıştırılır; Pillow bulunamazsa orijinal veri saklanır.【F:src/inciscraper/scraper.py†L2408-L2475】
-- **Uzun bileşen açıklamaları:** `ingredients.details_text` sütunu sınırsız
-  uzunlukta metni destekleyecek şekilde otomatik olarak yükseltilir; geçmiş
-  veriler kaybedilmeden yeni içerikler tam hâliyle saklanır.【F:src/inciscraper/scraper.py†L627-L905】【F:src/inciscraper/scraper.py†L782-L859】
+- **Zengin bileşen içerikleri:** Detay metni paragrafların yanı sıra madde
+  işaretli listeleri de koruyacak biçimde ayrıştırılır; Quick Facts, Show me
+  some proof ve "Ph. Eur. Name" alanları JSON olarak saklanır.【F:src/inciscraper/scraper.py†L627-L905】【F:src/inciscraper/scraper.py†L1908-L2013】【F:src/inciscraper/scraper.py†L1818-L1881】
 - **Akıllı yeniden tarama:** Varsayılan çalıştırma tüm marka, ürün ve detay
   sayfalarını baştan kontrol eder; içerikte değişiklik yoksa satırlar
   yeniden yazılmaz, yalnızca `last_checked_at` damgaları güncellenir. Değişiklik
@@ -110,12 +110,16 @@ Scraper aşağıdaki tabloları oluşturur ve kontrol eder:
 
 - **brands** – Marka adı, özgün URL, ürünlerinin işlenip işlenmediğini gösteren
   bayrak ile `last_checked_at`/`last_updated_at` damgaları.
-- **products** – Marka ilişkisi, ürün adı, açıklama, görsel yolu, JSON
-  formatında bileşen referansları (`ingredient_references_json`) ve detay
-  verilerinin en son ne zaman kontrol edildiğine dair damgalar.
+- **products** – Marka ilişkisi, ürün adı, açıklama, görsel yolu, bileşen
+  kimlikleri (`ingredient_ids_json`), #free etiketlerinin kimlikleri
+  (`free_tag_ids_json`) ve detay verilerinin en son ne zaman kontrol edildiğine
+  dair damgalar.【F:src/inciscraper/scraper.py†L640-L705】【F:src/inciscraper/scraper.py†L1554-L1627】
 - **ingredients** – Bileşenin derecelendirmesi, "başka adları", resmi COSING
-  bilgileri ve detay bölümünün HTML içeriği dahil kapsamlı metrikler ile son
-  kontrol/güncelleme zamanları.
+  bilgileri, Quick Facts / Show me some proof listeleri, Ph. Eur. isimleri ve
+  detay bölümünün metni dahil kapsamlı metrikler ile son kontrol/güncelleme
+  zamanları.【F:src/inciscraper/scraper.py†L662-L705】【F:src/inciscraper/scraper.py†L1955-L2033】
+- **frees** – #alcohol-free gibi hashtag tarzı pazarlama iddialarını ve ilgili
+  tooltip açıklamalarını saklar; ürünler bu tablodaki kimliklere bağlanır.【F:src/inciscraper/scraper.py†L668-L705】【F:src/inciscraper/scraper.py†L1668-L1708】
 - **metadata** – Kaldığı yerden devam edebilmek için kullanılan yardımcı
   anahtar/değer deposu.
 
