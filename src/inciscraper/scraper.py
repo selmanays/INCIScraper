@@ -12,9 +12,7 @@ INCIDecoder:
    store every product in the ``products`` table.
 3. **Product details** – visit each product page, capture the structured
    information (description, ingredients, highlights, etc.), download the lead
-   image and make sure ingredient level data is stored in the ``ingredients``
-   table.  The many-to-many relationship between products and ingredients is
-   represented in ``product_ingredients``.
+   image and store ingredient level data alongside the product record.
 
 Each stage is idempotent: the scraper relies on ``UNIQUE`` constraints in the
 SQLite schema and a set of boolean status flags so that interrupted runs can be
@@ -34,7 +32,8 @@ import time
 from io import BytesIO
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from datetime import datetime, timezone
+from typing import Dict, Iterable, List, Optional, Tuple
 from urllib import error, parse, request
 
 try:
@@ -53,52 +52,59 @@ DEFAULT_TIMEOUT = 30
 REQUEST_SLEEP = 0.5  # polite delay between HTTP requests
 PROGRESS_LOG_INTERVAL = 10
 
-EXPECTED_SCHEMA: Dict[str, Set[str]] = {
-    "brands": {"id", "name", "url", "products_scraped"},
+EXPECTED_SCHEMA: Dict[str, Dict[str, str]] = {
+    "brands": {
+        "id": "INTEGER",
+        "name": "TEXT NOT NULL",
+        "url": "TEXT NOT NULL UNIQUE",
+        "products_scraped": "INTEGER NOT NULL DEFAULT 0",
+        "last_checked_at": "TEXT",
+        "last_updated_at": "TEXT",
+    },
     "products": {
-        "id",
-        "brand_id",
-        "name",
-        "url",
-        "description",
-        "image_path",
-        "ingredient_ids_json",
-        "ingredient_functions_json",
-        "highlights_json",
-        "discontinued",
-        "replacement_product_url",
-        "details_scraped",
+        "id": "INTEGER",
+        "brand_id": "INTEGER NOT NULL",
+        "name": "TEXT NOT NULL",
+        "url": "TEXT NOT NULL UNIQUE",
+        "description": "TEXT",
+        "image_path": "TEXT",
+        "ingredient_ids_json": "TEXT",
+        "ingredient_functions_json": "TEXT",
+        "highlights_json": "TEXT",
+        "discontinued": "INTEGER NOT NULL DEFAULT 0",
+        "replacement_product_url": "TEXT",
+        "details_scraped": "INTEGER NOT NULL DEFAULT 0",
+        "last_checked_at": "TEXT",
+        "last_updated_at": "TEXT",
     },
     "ingredients": {
-        "id",
-        "name",
-        "url",
-        "rating_tag",
-        "also_called",
-        "function_ids_json",
-        "irritancy",
-        "comedogenicity",
-        "details_text",
-        "cosing_all_functions",
-        "cosing_description",
-        "cosing_cas",
-        "cosing_ec",
-        "cosing_chemical_name",
-        "cosing_restrictions",
+        "id": "INTEGER",
+        "name": "TEXT NOT NULL",
+        "url": "TEXT NOT NULL UNIQUE",
+        "rating_tag": "TEXT",
+        "also_called": "TEXT",
+        "function_ids_json": "TEXT",
+        "irritancy": "TEXT",
+        "comedogenicity": "TEXT",
+        "details_text": "LONGTEXT",
+        "cosing_all_functions": "TEXT",
+        "cosing_description": "TEXT",
+        "cosing_cas": "TEXT",
+        "cosing_ec": "TEXT",
+        "cosing_chemical_name": "TEXT",
+        "cosing_restrictions": "TEXT",
+        "last_checked_at": "TEXT",
+        "last_updated_at": "TEXT",
     },
     "ingredient_functions": {
-        "id",
-        "name",
-        "url",
-        "description",
+        "id": "INTEGER",
+        "name": "TEXT NOT NULL",
+        "url": "TEXT UNIQUE",
+        "description": "TEXT",
+        "last_checked_at": "TEXT",
+        "last_updated_at": "TEXT",
     },
-    "product_ingredients": {
-        "product_id",
-        "ingredient_id",
-        "tooltip_text",
-        "tooltip_ingredient_link",
-    },
-    "metadata": {"key", "value"},
+    "metadata": {"key": "TEXT PRIMARY KEY", "value": "TEXT NOT NULL"},
 }
 
 
@@ -291,9 +297,9 @@ class INCIScraper:
         """
         self._reset_autoincrement_if_table_empty("brands")
         if reset_offset:
-            self._set_metadata("brands_next_offset", "1")
-        start_offset = int(self._get_metadata("brands_next_offset", "1"))
-        if start_offset > 1:
+            self._set_metadata("brands_next_offset", "0")
+        start_offset = int(self._get_metadata("brands_next_offset", "0") or 0)
+        if start_offset > 0:
             LOGGER.info("Resuming brand collection from offset %s", start_offset)
         total_offsets_known = int(self._get_metadata("brands_total_offsets", "0") or 0)
         planned_pages = 0
@@ -320,7 +326,7 @@ class INCIScraper:
         estimated_total_offsets = total_offsets_known if total_offsets_known else 0
         completed_normally = False
         while True:
-            page_url = f"{self.base_url}/brands?offset={offset}"
+            page_url = self._append_offset(f"{self.base_url}/brands", offset)
             LOGGER.info("Fetching brand page %s", page_url)
             html = self._fetch_html(page_url)
             if html is None:
@@ -330,7 +336,7 @@ class INCIScraper:
             if not brands:
                 LOGGER.info("No brands found on page %s – stopping", page_url)
                 self._set_metadata("brands_complete", "1")
-                self._set_metadata("brands_next_offset", "1")
+                self._set_metadata("brands_next_offset", "0")
                 completed_normally = True
                 break
             new_entries = 0
@@ -383,11 +389,21 @@ class INCIScraper:
                 extra=extra,
             )
 
-    def scrape_products(self) -> None:
+    def scrape_products(self, *, reset_completed: bool = False) -> None:
         """Discover products for each brand pending product scraping.
 
         Türkçe: Ürün taraması bekleyen markalar için ürünleri keşfeder.
         """
+        if reset_completed:
+            LOGGER.info("Resetting product scraping state for all brands")
+            self.conn.execute("UPDATE brands SET products_scraped = 0")
+            self.conn.execute(
+                "DELETE FROM metadata WHERE key LIKE 'brand_products_next_offset:%'"
+            )
+            self.conn.execute(
+                "DELETE FROM metadata WHERE key LIKE 'brand_empty_products:%'"
+            )
+            self.conn.commit()
         self._reset_brand_completion_flags_if_products_empty()
         self._retry_incomplete_brand_products()
         cursor = self.conn.execute(
@@ -449,12 +465,15 @@ class INCIScraper:
             processed += 1
             if processed % PROGRESS_LOG_INTERVAL == 0 or processed == total_brands:
                 self._log_progress("Brand", processed, total_brands)
-
-    def scrape_product_details(self) -> None:
+    def scrape_product_details(self, *, reset_completed: bool = False) -> None:
         """Download and persist detailed information for each product.
 
         Türkçe: Her ürünün detay sayfasını indirip veritabanına kaydeder.
         """
+        if reset_completed:
+            LOGGER.info("Resetting detail scraping state for all products")
+            self.conn.execute("UPDATE products SET details_scraped = 0")
+            self.conn.commit()
         cursor = self.conn.execute(
             "SELECT id, brand_id, name, url FROM products WHERE details_scraped = 0 ORDER BY id"
         )
@@ -477,16 +496,11 @@ class INCIScraper:
                 continue
             image_path = self._download_product_image(details.image_url, details.name, product["id"])
             self._store_product_details(product["id"], details, image_path)
-            self.conn.execute(
-                "UPDATE products SET details_scraped = 1 WHERE id = ?",
-                (product["id"],),
-            )
             self.conn.commit()
             LOGGER.info("Stored product details for %s", details.name)
             processed += 1
             if processed % PROGRESS_LOG_INTERVAL == 0 or processed == total_products:
                 self._log_progress("Product", processed, total_products)
-
     def close(self) -> None:
         """Close the underlying SQLite connection.
 
@@ -510,7 +524,9 @@ class INCIScraper:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 url TEXT NOT NULL UNIQUE,
-                products_scraped INTEGER NOT NULL DEFAULT 0
+                products_scraped INTEGER NOT NULL DEFAULT 0,
+                last_checked_at TEXT,
+                last_updated_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS products (
@@ -525,7 +541,9 @@ class INCIScraper:
                 highlights_json TEXT,
                 discontinued INTEGER NOT NULL DEFAULT 0,
                 replacement_product_url TEXT,
-                details_scraped INTEGER NOT NULL DEFAULT 0
+                details_scraped INTEGER NOT NULL DEFAULT 0,
+                last_checked_at TEXT,
+                last_updated_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS ingredients (
@@ -543,22 +561,18 @@ class INCIScraper:
                 cosing_cas TEXT,
                 cosing_ec TEXT,
                 cosing_chemical_name TEXT,
-                cosing_restrictions TEXT
+                cosing_restrictions TEXT,
+                last_checked_at TEXT,
+                last_updated_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS ingredient_functions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 url TEXT UNIQUE,
-                description TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS product_ingredients (
-                product_id INTEGER NOT NULL REFERENCES products(id),
-                ingredient_id INTEGER NOT NULL REFERENCES ingredients(id),
-                tooltip_text TEXT,
-                tooltip_ingredient_link TEXT,
-                PRIMARY KEY (product_id, ingredient_id)
+                description TEXT,
+                last_checked_at TEXT,
+                last_updated_at TEXT
             );
 
             CREATE TABLE IF NOT EXISTS metadata (
@@ -630,7 +644,7 @@ class INCIScraper:
         if self._get_metadata("brands_complete") == "0":
             return True
         next_offset = self._get_metadata("brands_next_offset")
-        if next_offset and next_offset not in {"", "1"}:
+        if next_offset and next_offset not in {"", "0"}:
             return True
         return False
 
@@ -715,17 +729,41 @@ class INCIScraper:
                 cosing_cas TEXT,
                 cosing_ec TEXT,
                 cosing_chemical_name TEXT,
-                cosing_restrictions TEXT
+                cosing_restrictions TEXT,
+                last_checked_at TEXT,
+                last_updated_at TEXT
             );
             """
         )
-        columns = (
-            "id, name, url, rating_tag, also_called, function_ids_json, irritancy, "
-            "comedogenicity, details_text, cosing_all_functions, cosing_description, "
-            "cosing_cas, cosing_ec, cosing_chemical_name, cosing_restrictions"
-        )
+        backup_info = self.conn.execute("PRAGMA table_info(ingredients_backup)").fetchall()
+        backup_columns = {row["name"] for row in backup_info}
+        base_columns = [
+            "id",
+            "name",
+            "url",
+            "rating_tag",
+            "also_called",
+            "function_ids_json",
+            "irritancy",
+            "comedogenicity",
+            "details_text",
+            "cosing_all_functions",
+            "cosing_description",
+            "cosing_cas",
+            "cosing_ec",
+            "cosing_chemical_name",
+            "cosing_restrictions",
+        ]
+        optional_columns = ["last_checked_at", "last_updated_at"]
+        insert_columns = list(base_columns) + optional_columns
+        select_columns = list(base_columns)
+        for column in optional_columns:
+            if column in backup_columns:
+                select_columns.append(column)
+            else:
+                select_columns.append("NULL")
         self.conn.execute(
-            f"INSERT INTO ingredients ({columns}) SELECT {columns} FROM ingredients_backup"
+            f"INSERT INTO ingredients ({', '.join(insert_columns)}) SELECT {', '.join(select_columns)} FROM ingredients_backup"
         )
         self.conn.execute("DROP TABLE ingredients_backup")
         self.conn.commit()
@@ -750,14 +788,31 @@ class INCIScraper:
             if not rows:
                 continue
             actual_columns = {row["name"] for row in rows}
-            if actual_columns != expected_columns:
+            expected_names = set(expected_columns.keys())
+            extra_columns = actual_columns - expected_names
+            if extra_columns:
                 LOGGER.info(
-                    "Recreating table %s due to schema mismatch (expected: %s, found: %s)",
+                    "Recreating table %s due to unexpected columns (expected: %s, found extras: %s)",
                     table,
-                    sorted(expected_columns),
-                    sorted(actual_columns),
+                    sorted(expected_names),
+                    sorted(extra_columns),
                 )
                 self.conn.execute(f"DROP TABLE IF EXISTS {table}")
+                continue
+            missing_columns = expected_names - actual_columns
+            for column in sorted(missing_columns):
+                definition = expected_columns.get(column, "")
+                if not definition:
+                    LOGGER.warning(
+                        "Skipping addition of column %s on table %s – no definition available",
+                        column,
+                        table,
+                    )
+                    continue
+                LOGGER.info("Adding missing column %s to table %s", column, table)
+                self.conn.execute(
+                    f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
+                )
         self.conn.commit()
 
     # ------------------------------------------------------------------
@@ -818,7 +873,7 @@ class INCIScraper:
         products_pending_details = self.conn.execute(
             "SELECT COUNT(*) FROM products WHERE details_scraped = 0"
         ).fetchone()[0]
-        start_offset = int(self._get_metadata("brands_next_offset", "1"))
+        start_offset = int(self._get_metadata("brands_next_offset", "0") or 0)
         total_offsets_known = int(self._get_metadata("brands_total_offsets", "0") or 0)
         brand_pages_remaining: Optional[int]
         if total_offsets_known:
@@ -873,15 +928,39 @@ class INCIScraper:
 
         Türkçe: Marka daha önce eklenmediyse veritabanına kaydeder.
         """
-        cur = self.conn.execute(
-            "INSERT OR IGNORE INTO brands (name, url) VALUES (?, ?)",
-            (name, url),
+        now = self._current_timestamp()
+        row = self.conn.execute(
+            "SELECT id, name, last_updated_at FROM brands WHERE url = ?",
+            (url,),
+        ).fetchone()
+        if row is None:
+            self.conn.execute(
+                """
+                INSERT INTO brands (name, url, products_scraped, last_checked_at, last_updated_at)
+                VALUES (?, ?, 0, ?, ?)
+                """,
+                (name, url, now, now),
+            )
+            return 1
+        changed = False
+        assignments: List[str] = []
+        params: List[object] = []
+        if row["name"] != name:
+            assignments.append("name = ?")
+            params.append(name)
+            changed = True
+        assignments.append("last_checked_at = ?")
+        params.append(now)
+        if changed:
+            assignments.append("last_updated_at = ?")
+            params.append(now)
+        params.append(row["id"])
+        assignment = ", ".join(assignments)
+        self.conn.execute(
+            f"UPDATE brands SET {assignment} WHERE id = ?",
+            params,
         )
-        if cur.rowcount == 0:
-            # Update the brand name in case it changed on the website
-            self.conn.execute("UPDATE brands SET name = ? WHERE url = ?", (name, url))
-            return 0
-        return 1
+        return 0
 
     def _collect_products_for_brand(
         self, brand_id: int, brand_url: str, *, start_offset: int = 1
@@ -1013,14 +1092,42 @@ class INCIScraper:
 
         Türkçe: Ürünü kaydeder; varsa adını günceller.
         """
-        cur = self.conn.execute(
-            "INSERT OR IGNORE INTO products (brand_id, name, url) VALUES (?, ?, ?)",
-            (brand_id, name, url),
+        now = self._current_timestamp()
+        row = self.conn.execute(
+            "SELECT id, brand_id, name FROM products WHERE url = ?",
+            (url,),
+        ).fetchone()
+        if row is None:
+            self.conn.execute(
+                """
+                INSERT INTO products (brand_id, name, url, last_checked_at, last_updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (brand_id, name, url, now, now),
+            )
+            return 1
+        changed = False
+        assignments: List[str] = []
+        params: List[object] = []
+        if row["name"] != name:
+            assignments.append("name = ?")
+            params.append(name)
+            changed = True
+        if row["brand_id"] != brand_id:
+            assignments.append("brand_id = ?")
+            params.append(brand_id)
+            changed = True
+        assignments.append("last_checked_at = ?")
+        params.append(now)
+        if changed:
+            assignments.append("last_updated_at = ?")
+            params.append(now)
+        params.append(row["id"])
+        self.conn.execute(
+            f"UPDATE products SET {', '.join(assignments)} WHERE id = ?",
+            params,
         )
-        if cur.rowcount == 0:
-            self.conn.execute("UPDATE products SET name = ? WHERE url = ?", (name, url))
-            return 0
-        return 1
+        return 0
 
     # ------------------------------------------------------------------
     # Product detail parsing
@@ -1268,82 +1375,102 @@ class INCIScraper:
 
         Türkçe: Ayrıştırılan ürün detaylarını ve bileşen ilişkilerini kaydeder.
         """
-        self.conn.execute(
-            "DELETE FROM product_ingredients WHERE product_id = ?",
-            (product_id,),
-        )
-        ingredient_ids: List[int] = []
+        now = self._current_timestamp()
+        ingredient_entries: List[Dict[str, object | None]] = []
         for ingredient in details.ingredients:
             ingredient_id = self._ensure_ingredient(ingredient)
             ingredient.ingredient_id = ingredient_id
-            ingredient_ids.append(ingredient_id)
-            self.conn.execute(
-                """
-                INSERT OR REPLACE INTO product_ingredients
-                (product_id, ingredient_id, tooltip_text, tooltip_ingredient_link)
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    product_id,
-                    ingredient_id,
-                    ingredient.tooltip_text,
-                    ingredient.tooltip_ingredient_link,
-                ),
+            ingredient_entries.append(
+                {
+                    "ingredient_id": ingredient_id,
+                    "ingredient_name": ingredient.name,
+                    "ingredient_url": ingredient.url,
+                    "tooltip_text": ingredient.tooltip_text,
+                    "tooltip_ingredient_link": ingredient.tooltip_ingredient_link,
+                }
             )
-        self.conn.execute(
+        ingredient_json = json.dumps(ingredient_entries, ensure_ascii=False, sort_keys=True)
+        functions_json = json.dumps(
+            [
+                {
+                    "ingredient_name": row.ingredient_name,
+                    "ingredient_page": row.ingredient_page,
+                    "what_it_does": row.what_it_does,
+                    "function_links": row.function_links,
+                }
+                for row in details.ingredient_functions
+            ],
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        highlights_json = json.dumps(
+            {
+                "hashtags": details.highlights.hashtags,
+                "key_ingredients": [
+                    {
+                        "function_name": entry.function_name,
+                        "function_link": entry.function_link,
+                        "ingredient_name": entry.ingredient_name,
+                        "ingredient_page": entry.ingredient_page,
+                    }
+                    for entry in details.highlights.key_ingredients
+                ],
+                "other_ingredients": [
+                    {
+                        "function_name": entry.function_name,
+                        "function_link": entry.function_link,
+                        "ingredient_name": entry.ingredient_name,
+                        "ingredient_page": entry.ingredient_page,
+                    }
+                    for entry in details.highlights.other_ingredients
+                ],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        row = self.conn.execute(
             """
-            UPDATE products
-            SET name = ?, description = ?, image_path = ?,
-                ingredient_ids_json = ?, ingredient_functions_json = ?,
-                highlights_json = ?, discontinued = ?,
-                replacement_product_url = ?
+            SELECT name, description, image_path, ingredient_ids_json,
+                   ingredient_functions_json, highlights_json, discontinued,
+                   replacement_product_url, details_scraped
+            FROM products
             WHERE id = ?
             """,
-            (
-                details.name,
-                details.description,
-                image_path,
-                json.dumps(ingredient_ids, ensure_ascii=False),
-                json.dumps(
-                    [
-                        {
-                            "ingredient_name": row.ingredient_name,
-                            "ingredient_page": row.ingredient_page,
-                            "what_it_does": row.what_it_does,
-                            "function_links": row.function_links,
-                        }
-                        for row in details.ingredient_functions
-                    ],
-                    ensure_ascii=False,
-                ),
-                json.dumps(
-                    {
-                        "hashtags": details.highlights.hashtags,
-                        "key_ingredients": [
-                            {
-                                "function_name": entry.function_name,
-                                "function_link": entry.function_link,
-                                "ingredient_name": entry.ingredient_name,
-                                "ingredient_page": entry.ingredient_page,
-                            }
-                            for entry in details.highlights.key_ingredients
-                        ],
-                        "other_ingredients": [
-                            {
-                                "function_name": entry.function_name,
-                                "function_link": entry.function_link,
-                                "ingredient_name": entry.ingredient_name,
-                                "ingredient_page": entry.ingredient_page,
-                            }
-                            for entry in details.highlights.other_ingredients
-                        ],
-                    },
-                    ensure_ascii=False,
-                ),
-                1 if details.discontinued else 0,
-                details.replacement_product_url,
-                product_id,
-            ),
+            (product_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(f"Product {product_id} missing when storing details")
+        existing_image = row["image_path"]
+        final_image_path = image_path if image_path is not None else existing_image
+        update_payload: Dict[str, object | None] = {
+            "name": details.name,
+            "description": details.description,
+            "image_path": final_image_path,
+            "ingredient_ids_json": ingredient_json,
+            "ingredient_functions_json": functions_json,
+            "highlights_json": highlights_json,
+            "discontinued": 1 if details.discontinued else 0,
+            "replacement_product_url": details.replacement_product_url,
+        }
+        assignments: List[str] = []
+        params: List[object] = []
+        changed = False
+        for column, value in update_payload.items():
+            if row[column] != value:
+                assignments.append(f"{column} = ?")
+                params.append(value)
+                changed = True
+        if row["details_scraped"] != 1:
+            assignments.append("details_scraped = 1")
+        assignments.append("last_checked_at = ?")
+        params.append(now)
+        if changed:
+            assignments.append("last_updated_at = ?")
+            params.append(now)
+        params.append(product_id)
+        self.conn.execute(
+            f"UPDATE products SET {', '.join(assignments)} WHERE id = ?",
+            params,
         )
 
     def _ensure_ingredient(self, ingredient: IngredientReference) -> int:
@@ -1351,19 +1478,35 @@ class INCIScraper:
 
         Türkçe: Bileşen kaydını oluşturup kimliğini döndürür.
         """
+        now = self._current_timestamp()
         row = self.conn.execute(
-            "SELECT id FROM ingredients WHERE url = ?",
+            "SELECT id, name FROM ingredients WHERE url = ?",
             (ingredient.url,),
         ).fetchone()
         if row:
+            assignments = ["last_checked_at = ?"]
+            params: List[object] = [now]
+            if ingredient.name and ingredient.name != row["name"]:
+                assignments.append("name = ?")
+                params.append(ingredient.name)
+                assignments.append("last_updated_at = ?")
+                params.append(now)
+            params.append(row["id"])
+            self.conn.execute(
+                f"UPDATE ingredients SET {', '.join(assignments)} WHERE id = ?",
+                params,
+            )
             return row["id"]
         try:
             details = self._scrape_ingredient_page(ingredient.url)
         except RuntimeError:
             LOGGER.exception("Failed to scrape ingredient %s", ingredient.url)
             self.conn.execute(
-                "INSERT OR IGNORE INTO ingredients (name, url) VALUES (?, ?)",
-                (ingredient.name, ingredient.url),
+                """
+                INSERT OR IGNORE INTO ingredients (name, url, last_checked_at, last_updated_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (ingredient.name, ingredient.url, now, now),
             )
         else:
             ingredient_id = self._store_ingredient_details(details)
@@ -1617,46 +1760,61 @@ class INCIScraper:
             function_id = self._ensure_ingredient_function(function)
             if function_id is not None:
                 function_ids.append(function_id)
-        self.conn.execute(
+        function_ids_json = json.dumps(function_ids, ensure_ascii=False)
+        now = self._current_timestamp()
+        payload: Dict[str, Optional[str]] = {
+            "name": details.name,
+            "rating_tag": details.rating_tag,
+            "also_called": details.also_called,
+            "function_ids_json": function_ids_json,
+            "irritancy": details.irritancy,
+            "comedogenicity": details.comedogenicity,
+            "details_text": details.details_text,
+            "cosing_all_functions": details.cosing_all_functions,
+            "cosing_description": details.cosing_description,
+            "cosing_cas": details.cosing_cas,
+            "cosing_ec": details.cosing_ec,
+            "cosing_chemical_name": details.cosing_chemical_name,
+            "cosing_restrictions": details.cosing_restrictions,
+        }
+        row = self.conn.execute(
             """
-            INSERT INTO ingredients (
-                name, url, rating_tag, also_called, function_ids_json,
-                irritancy, comedogenicity, details_text, cosing_all_functions,
-                cosing_description, cosing_cas, cosing_ec, cosing_chemical_name,
-                cosing_restrictions
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(url) DO UPDATE SET
-                name = excluded.name,
-                rating_tag = excluded.rating_tag,
-                also_called = excluded.also_called,
-                function_ids_json = excluded.function_ids_json,
-                irritancy = excluded.irritancy,
-                comedogenicity = excluded.comedogenicity,
-                details_text = excluded.details_text,
-                cosing_all_functions = excluded.cosing_all_functions,
-                cosing_description = excluded.cosing_description,
-                cosing_cas = excluded.cosing_cas,
-                cosing_ec = excluded.cosing_ec,
-                cosing_chemical_name = excluded.cosing_chemical_name,
-                cosing_restrictions = excluded.cosing_restrictions
+            SELECT id, name, rating_tag, also_called, function_ids_json,
+                   irritancy, comedogenicity, details_text, cosing_all_functions,
+                   cosing_description, cosing_cas, cosing_ec, cosing_chemical_name,
+                   cosing_restrictions
+            FROM ingredients
+            WHERE url = ?
             """,
-            (
-                details.name,
-                details.url,
-                details.rating_tag,
-                details.also_called,
-                json.dumps(function_ids, ensure_ascii=False),
-                details.irritancy,
-                details.comedogenicity,
-                details.details_text,
-                details.cosing_all_functions,
-                details.cosing_description,
-                details.cosing_cas,
-                details.cosing_ec,
-                details.cosing_chemical_name,
-                details.cosing_restrictions,
-            ),
-        )
+            (details.url,),
+        ).fetchone()
+        if row is None:
+            columns = ["url"] + list(payload.keys()) + ["last_checked_at", "last_updated_at"]
+            values = [details.url] + [payload[col] for col in payload] + [now, now]
+            placeholders = ", ".join("?" for _ in columns)
+            self.conn.execute(
+                f"INSERT INTO ingredients ({', '.join(columns)}) VALUES ({placeholders})",
+                values,
+            )
+        else:
+            assignments: List[str] = []
+            params: List[object] = []
+            changed = False
+            for column, value in payload.items():
+                if row[column] != value:
+                    assignments.append(f"{column} = ?")
+                    params.append(value)
+                    changed = True
+            assignments.append("last_checked_at = ?")
+            params.append(now)
+            if changed:
+                assignments.append("last_updated_at = ?")
+                params.append(now)
+            params.append(row["id"])
+            self.conn.execute(
+                f"UPDATE ingredients SET {', '.join(assignments)} WHERE id = ?",
+                params,
+            )
         row = self.conn.execute(
             "SELECT id FROM ingredients WHERE url = ?",
             (details.url,),
@@ -1664,7 +1822,6 @@ class INCIScraper:
         if not row:
             raise RuntimeError(f"Unable to store ingredient {details.url}")
         return row["id"]
-
     def _ensure_ingredient_function(self, info: IngredientFunctionInfo) -> Optional[int]:
         """Ensure an ingredient function entry exists and return its id.
 
@@ -1675,6 +1832,7 @@ class INCIScraper:
         description = info.description.strip()
         if not name and not url:
             return None
+        now = self._current_timestamp()
         row = None
         if url:
             row = self.conn.execute(
@@ -1691,25 +1849,34 @@ class INCIScraper:
                 (name,),
             ).fetchone()
         if row:
-            updates: Dict[str, str] = {}
+            assignments: List[str] = []
+            params: List[object] = []
+            changed = False
             if name and name != row["name"]:
-                updates["name"] = name
+                assignments.append("name = ?")
+                params.append(name)
+                changed = True
             if description and description != (row["description"] or ""):
-                updates["description"] = description
-            if updates:
-                assignments = ", ".join(f"{col} = ?" for col in updates)
-                params = list(updates.values()) + [row["id"]]
-                self.conn.execute(
-                    f"UPDATE ingredient_functions SET {assignments} WHERE id = ?",
-                    params,
-                )
+                assignments.append("description = ?")
+                params.append(description)
+                changed = True
+            assignments.append("last_checked_at = ?")
+            params.append(now)
+            if changed:
+                assignments.append("last_updated_at = ?")
+                params.append(now)
+            params.append(row["id"])
+            self.conn.execute(
+                f"UPDATE ingredient_functions SET {', '.join(assignments)} WHERE id = ?",
+                params,
+            )
             return row["id"]
         cur = self.conn.execute(
             """
-            INSERT INTO ingredient_functions (name, url, description)
-            VALUES (?, ?, ?)
+            INSERT INTO ingredient_functions (name, url, description, last_checked_at, last_updated_at)
+            VALUES (?, ?, ?, ?, ?)
             """,
-            (name, url, description),
+            (name, url, description, now, now),
         )
         return cur.lastrowid
 
@@ -2155,6 +2322,13 @@ class INCIScraper:
     # ------------------------------------------------------------------
     # Misc helpers
     # ------------------------------------------------------------------
+    def _current_timestamp(self) -> str:
+        """Return the current UTC timestamp as an ISO 8601 string.
+
+        Türkçe: Geçerli UTC zaman damgasını ISO 8601 biçiminde döndürür.
+        """
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
     def _absolute_url(self, href: str) -> str:
         """Resolve ``href`` relative to the configured base URL.
 
@@ -2169,6 +2343,8 @@ class INCIScraper:
 
         Türkçe: ``base_url`` adresine sayfalama ofseti sorgu parametresi ekler.
         """
+        if offset <= 0:
+            return base_url
         if "?" in base_url:
             return f"{base_url}&offset={offset}"
         return f"{base_url}?offset={offset}"

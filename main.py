@@ -62,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--resume/--no-resume",
         dest="resume",
-        default=True,
+        default=False,
         action=argparse.BooleanOptionalAction,
         help="Skip completed steps when running the full pipeline",
     )
@@ -133,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
                 logging.info("Skipping brand collection – already complete")
         if args.step in {"all", "products"}:
             if args.step == "products" or not args.resume or scraper.has_product_work():
-                scraper.scrape_products()
+                scraper.scrape_products(reset_completed=not args.resume)
             else:
                 logging.info("Skipping product collection – nothing left to do")
         if args.step in {"all", "details"}:
@@ -142,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
                 or not args.resume
                 or scraper.has_product_detail_work()
             ):
-                scraper.scrape_product_details()
+                scraper.scrape_product_details(reset_completed=not args.resume)
             else:
                 logging.info("Skipping product detail collection – nothing left to do")
     finally:
