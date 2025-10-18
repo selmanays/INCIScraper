@@ -17,6 +17,9 @@ scraper sunar.
 - **Dayanıklı veritabanı şeması:** Scraper açılışta gerekli tabloları oluşturur,
   eksik sütunları ekler ve beklenmeyen yapıları temizleyerek veri tutarlılığı
   sağlar.【F:src/inciscraper/scraper.py†L418-L509】
+- **Otomatik durum sıfırlama:** Ürün tablosu temizlendiğinde marka
+  ``products_scraped`` bayrakları ve ``sqlite_sequence`` sayaçları otomatik
+  olarak sıfırlanır; böylece yeniden tarama hatasız başlar.【F:src/inciscraper/scraper.py†L309-L392】【F:src/inciscraper/scraper.py†L512-L601】
 - **Bağımlılık dostu HTML ayrıştırıcı:** `html.parser` üzerine kurulu özel DOM
   katmanı BeautifulSoup benzeri bir API sunarak ek bağımlılıklara gerek
   bırakmaz.【F:src/inciscraper/parser.py†L1-L159】【F:src/inciscraper/parser.py†L321-L414】
@@ -25,6 +28,9 @@ scraper sunar.
   kurar.【F:src/inciscraper/scraper.py†L621-L808】【F:src/inciscraper/scraper.py†L862-L1103】
 - **Görsel optimizasyonu:** Ürün görselleri indirilip WebP (mümkünse lossless)
   olarak sıkıştırılır; Pillow bulunamazsa orijinal veri saklanır.【F:src/inciscraper/scraper.py†L1126-L1230】
+- **Uzun bileşen açıklamaları:** `ingredients.details_text` sütunu sınırsız
+  uzunlukta metni destekleyecek şekilde otomatik olarak yükseltilir; geçmiş
+  veriler kaybedilmeden yeni içerikler tam hâliyle saklanır.【F:src/inciscraper/scraper.py†L418-L509】【F:src/inciscraper/scraper.py†L509-L685】
 
 ## Gereksinimler
 

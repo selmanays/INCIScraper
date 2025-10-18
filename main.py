@@ -7,6 +7,11 @@ from inciscraper import INCIScraper
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """Create and configure the command line argument parser.
+
+    Türkçe: Komut satırı argümanlarını ayrıştıracak `ArgumentParser` nesnesini
+    oluşturup tüm seçenekleri tanımlar.
+    """
     parser = argparse.ArgumentParser(
         description=(
             "Scrape brand, product and ingredient information from INCIDecoder "
@@ -71,6 +76,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def configure_logging(level: str) -> None:
+    """Initialise the logging configuration for the CLI.
+
+    Türkçe: Komut satırı aracının günlük yapılandırmasını verilen ayrıntı
+    seviyesine göre kurar.
+    """
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -78,6 +88,12 @@ def configure_logging(level: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Entry point used by both the module and command line execution.
+
+    Türkçe: Hem modül hem de doğrudan komut satırı çalıştırmaları için başlangıç
+    noktası olup, argümanları okur, scraper'ı başlatır ve seçilen adımları
+    yürütür.
+    """
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.max_pages is not None and args.max_pages < 1:

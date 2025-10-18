@@ -1,5 +1,8 @@
 """High level scraping logic for collecting data from INCIDecoder.
 
+Türkçe: INCIDecoder verilerini toplamak için kullanılan üst düzey scraping
+mantığı.
+
 The scraper follows three sequential stages that mirror the data hierarchy on
 INCIDecoder:
 
@@ -101,6 +104,10 @@ EXPECTED_SCHEMA: Dict[str, Set[str]] = {
 
 @dataclass
 class IngredientReference:
+    """Reference to an ingredient mentioned within a product listing.
+
+    Türkçe: Ürün sayfasında geçen bir bileşene ait referans bilgisini temsil eder.
+    """
     name: str
     url: str
     tooltip_text: Optional[str]
@@ -110,6 +117,10 @@ class IngredientReference:
 
 @dataclass
 class IngredientFunction:
+    """Function metadata extracted for an ingredient.
+
+    Türkçe: Bir bileşen için çıkarılan fonksiyon bilgilerini temsil eder.
+    """
     ingredient_name: str
     ingredient_page: Optional[str]
     what_it_does: List[str]
@@ -118,6 +129,10 @@ class IngredientFunction:
 
 @dataclass
 class HighlightEntry:
+    """Represents a highlighted ingredient and optional function link.
+
+    Türkçe: Öne çıkarılan bileşen ve varsa fonksiyon bağlantısını temsil eder.
+    """
     function_name: Optional[str]
     function_link: Optional[str]
     ingredient_name: Optional[str]
@@ -126,6 +141,10 @@ class HighlightEntry:
 
 @dataclass
 class ProductHighlights:
+    """Container for hashtag and ingredient highlight sections.
+
+    Türkçe: Hashtag ve bileşen vurgularını tutan veri yapısıdır.
+    """
     hashtags: List[str]
     key_ingredients: List[HighlightEntry]
     other_ingredients: List[HighlightEntry]
@@ -133,6 +152,10 @@ class ProductHighlights:
 
 @dataclass
 class ProductDetails:
+    """Structured representation of all parsed product details.
+
+    Türkçe: Ayrıştırılan ürün detaylarını yapılandırılmış şekilde tutar.
+    """
     name: str
     description: str
     image_url: Optional[str]
@@ -145,6 +168,10 @@ class ProductDetails:
 
 @dataclass
 class IngredientDetails:
+    """Normalized information fetched from an ingredient page.
+
+    Türkçe: Bir bileşen sayfasından toplanan normalleştirilmiş bilgileri içerir.
+    """
     name: str
     url: str
     rating_tag: str
@@ -163,13 +190,20 @@ class IngredientDetails:
 
 @dataclass
 class IngredientFunctionInfo:
+    """Describes a single cosmetic function entry.
+
+    Türkçe: Tek bir kozmetik fonksiyon kaydını açıklar.
+    """
     name: str
     url: Optional[str]
     description: str
 
 
 class INCIScraper:
-    """Main entry point that orchestrates all scraping steps."""
+    """Main entry point that orchestrates all scraping steps.
+
+    Türkçe: Scraping sürecindeki tüm aşamaları yöneten ana giriş sınıfı.
+    """
 
     def __init__(
         self,
@@ -180,6 +214,11 @@ class INCIScraper:
         request_timeout: int = DEFAULT_TIMEOUT,
         alternate_base_urls: Optional[Iterable[str]] = None,
     ) -> None:
+        """Configure the scraper runtime and open the database.
+
+        Türkçe: Scraper çalışma zamanını yapılandırır ve veritabanı bağlantısını
+        açar.
+        """
         self.base_url = base_url.rstrip("/")
         self.timeout = request_timeout
         self.image_dir = Path(image_dir)
@@ -199,7 +238,10 @@ class INCIScraper:
     # Public API
     # ------------------------------------------------------------------
     def run(self) -> None:
-        """Execute the full scraping pipeline."""
+        """Execute the full scraping pipeline.
+
+        Türkçe: Tüm scraping adımlarını sırasıyla çalıştırır.
+        """
 
         LOGGER.info("Starting brand collection")
         self.scrape_brands()
@@ -209,7 +251,10 @@ class INCIScraper:
         self.scrape_product_details()
 
     def resume_incomplete_metadata(self) -> None:
-        """Complete any partial work recorded in the metadata table."""
+        """Complete any partial work recorded in the metadata table.
+
+        Türkçe: Metadata tablosundaki yarım kalmış işleri tamamlar.
+        """
 
         resumed_anything = False
 
@@ -240,6 +285,11 @@ class INCIScraper:
         reset_offset: bool = False,
         max_pages: int | None = None,
     ) -> None:
+        """Collect brand listings and persist them to the database.
+
+        Türkçe: Marka listelerini toplar ve veritabanına kaydeder.
+        """
+        self._reset_autoincrement_if_table_empty("brands")
         if reset_offset:
             self._set_metadata("brands_next_offset", "1")
         start_offset = int(self._get_metadata("brands_next_offset", "1"))
@@ -334,6 +384,11 @@ class INCIScraper:
             )
 
     def scrape_products(self) -> None:
+        """Discover products for each brand pending product scraping.
+
+        Türkçe: Ürün taraması bekleyen markalar için ürünleri keşfeder.
+        """
+        self._reset_brand_completion_flags_if_products_empty()
         self._retry_incomplete_brand_products()
         cursor = self.conn.execute(
             "SELECT id, name, url FROM brands WHERE products_scraped = 0 ORDER BY id"
@@ -396,6 +451,10 @@ class INCIScraper:
                 self._log_progress("Brand", processed, total_brands)
 
     def scrape_product_details(self) -> None:
+        """Download and persist detailed information for each product.
+
+        Türkçe: Her ürünün detay sayfasını indirip veritabanına kaydeder.
+        """
         cursor = self.conn.execute(
             "SELECT id, brand_id, name, url FROM products WHERE details_scraped = 0 ORDER BY id"
         )
@@ -429,12 +488,20 @@ class INCIScraper:
                 self._log_progress("Product", processed, total_products)
 
     def close(self) -> None:
+        """Close the underlying SQLite connection.
+
+        Türkçe: Kullanılan SQLite bağlantısını kapatır.
+        """
         self.conn.close()
 
     # ------------------------------------------------------------------
     # Database initialisation
     # ------------------------------------------------------------------
     def _init_db(self) -> None:
+        """Create required tables and ensure the schema is up to date.
+
+        Türkçe: Gerekli tabloları oluşturur ve şemanın güncel olduğundan emin olur.
+        """
         cursor = self.conn.cursor()
         self._enforce_schema()
         cursor.executescript(
@@ -470,7 +537,7 @@ class INCIScraper:
                 function_ids_json TEXT,
                 irritancy TEXT,
                 comedogenicity TEXT,
-                details_text TEXT,
+                details_text LONGTEXT,
                 cosing_all_functions TEXT,
                 cosing_description TEXT,
                 cosing_cas TEXT,
@@ -501,11 +568,17 @@ class INCIScraper:
             """
         )
         self.conn.commit()
+        self._ensure_ingredient_details_capacity()
 
     # ------------------------------------------------------------------
     # Metadata helpers
     # ------------------------------------------------------------------
     def _get_metadata(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Fetch a metadata value, returning ``default`` when missing.
+
+        Türkçe: Metadata anahtarına karşılık gelen değeri döndürür; yoksa
+        varsayılanı verir.
+        """
         cursor = self.conn.execute("SELECT value FROM metadata WHERE key = ?", (key,))
         row = cursor.fetchone()
         if row is None:
@@ -513,6 +586,11 @@ class INCIScraper:
         return row["value"]
 
     def _set_metadata(self, key: str, value: str) -> None:
+        """Insert or update a metadata entry.
+
+        Türkçe: Metadata tablosuna yeni bir kayıt ekler veya mevcut değeri
+        günceller.
+        """
         self.conn.execute(
             """
             INSERT INTO metadata (key, value) VALUES (?, ?)
@@ -523,10 +601,19 @@ class INCIScraper:
         self.conn.commit()
 
     def _delete_metadata(self, key: str) -> None:
+        """Remove a metadata entry if it exists.
+
+        Türkçe: Metadata tablosundan belirtilen anahtarı siler.
+        """
         self.conn.execute("DELETE FROM metadata WHERE key = ?", (key,))
         self.conn.commit()
 
     def _count_metadata_with_prefix(self, prefix: str) -> int:
+        """Count metadata entries whose key starts with ``prefix``.
+
+        Türkçe: Anahtarı verilen önekle başlayan metadata kayıtlarının sayısını
+        döndürür.
+        """
         cursor = self.conn.execute(
             "SELECT COUNT(*) AS total FROM metadata WHERE key LIKE ?",
             (f"{prefix}%",),
@@ -535,6 +622,11 @@ class INCIScraper:
         return int(row["total"]) if row else 0
 
     def _metadata_has_incomplete_brands(self) -> bool:
+        """Check whether brand collection metadata indicates unfinished work.
+
+        Türkçe: Marka toplama adımının yarım kalıp kalmadığını metadata üzerinden
+        kontrol eder.
+        """
         if self._get_metadata("brands_complete") == "0":
             return True
         next_offset = self._get_metadata("brands_next_offset")
@@ -542,7 +634,108 @@ class INCIScraper:
             return True
         return False
 
+    def _reset_brand_completion_flags_if_products_empty(self) -> None:
+        """Reset brand completion flags when the products table has been cleared.
+
+        Türkçe: Ürünler tablosu boşaldığında marka tamamlama bayraklarını
+        sıfırlar.
+        """
+        completed_brands = self.conn.execute(
+            "SELECT COUNT(*) FROM brands WHERE products_scraped = 1"
+        ).fetchone()[0]
+        if completed_brands == 0:
+            return
+        total_products = self.conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+        if total_products > 0:
+            return
+        LOGGER.info(
+            "Products table is empty but %s brand(s) marked complete – resetting state",
+            completed_brands,
+        )
+        self.conn.execute("UPDATE brands SET products_scraped = 0")
+        self.conn.execute(
+            "DELETE FROM metadata WHERE key LIKE 'brand_products_next_offset:%'"
+        )
+        self.conn.execute(
+            "DELETE FROM metadata WHERE key LIKE 'brand_empty_products:%'"
+        )
+        self.conn.commit()
+
+    def _reset_autoincrement_if_table_empty(self, table: str) -> None:
+        """Reset the SQLite autoincrement counter when ``table`` has no rows.
+
+        Türkçe: Tablo boşaldığında SQLite otomatik artış sayacını sıfırlar.
+        """
+        count = self.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        if count != 0:
+            return
+        try:
+            self.conn.execute("DELETE FROM sqlite_sequence WHERE name = ?", (table,))
+            self.conn.commit()
+            LOGGER.info("Reset autoincrement sequence for empty table %s", table)
+        except sqlite3.OperationalError:
+            LOGGER.debug("sqlite_sequence not available when resetting table %s", table)
+
+    def _ensure_ingredient_details_capacity(self) -> None:
+        """Ensure the ingredient details column can store lengthy text values.
+
+        Türkçe: Bileşen detay sütununun uzun metinleri saklayabildiğini garanti eder.
+        """
+        cursor = self.conn.execute("PRAGMA table_info(ingredients)")
+        rows = cursor.fetchall()
+        target_row = None
+        for row in rows:
+            if row["name"] == "details_text":
+                target_row = row
+                break
+        if target_row is None:
+            return
+        column_type = (target_row["type"] or "").upper()
+        if column_type in {"", "TEXT", "LONGTEXT"}:
+            return
+        LOGGER.info(
+            "Rebuilding ingredients table to expand details_text capacity (previous type: %s)",
+            column_type,
+        )
+        self.conn.execute("ALTER TABLE ingredients RENAME TO ingredients_backup")
+        self.conn.executescript(
+            """
+            CREATE TABLE ingredients (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                url TEXT NOT NULL UNIQUE,
+                rating_tag TEXT,
+                also_called TEXT,
+                function_ids_json TEXT,
+                irritancy TEXT,
+                comedogenicity TEXT,
+                details_text LONGTEXT,
+                cosing_all_functions TEXT,
+                cosing_description TEXT,
+                cosing_cas TEXT,
+                cosing_ec TEXT,
+                cosing_chemical_name TEXT,
+                cosing_restrictions TEXT
+            );
+            """
+        )
+        columns = (
+            "id, name, url, rating_tag, also_called, function_ids_json, irritancy, "
+            "comedogenicity, details_text, cosing_all_functions, cosing_description, "
+            "cosing_cas, cosing_ec, cosing_chemical_name, cosing_restrictions"
+        )
+        self.conn.execute(
+            f"INSERT INTO ingredients ({columns}) SELECT {columns} FROM ingredients_backup"
+        )
+        self.conn.execute("DROP TABLE ingredients_backup")
+        self.conn.commit()
+
     def _enforce_schema(self) -> None:
+        """Ensure only expected tables and columns exist in the database.
+
+        Türkçe: Veritabanında sadece beklenen tablo ve sütunların bulunduğunu
+        doğrular.
+        """
         cursor = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         existing_tables = {row["name"] for row in cursor.fetchall()}
         for table in existing_tables:
@@ -571,15 +764,27 @@ class INCIScraper:
     # Workload inspection helpers
     # ------------------------------------------------------------------
     def has_brand_work(self) -> bool:
+        """Return ``True`` when brand scraping still has pending work.
+
+        Türkçe: Marka toplama adımında iş kalıp kalmadığını bildirir.
+        """
         return self._get_metadata("brands_complete") != "1"
 
     def has_product_work(self) -> bool:
+        """Return ``True`` when there are brands awaiting product scraping.
+
+        Türkçe: Ürün taraması bekleyen marka olup olmadığını bildirir.
+        """
         cursor = self.conn.execute(
             "SELECT 1 FROM brands WHERE products_scraped = 0 LIMIT 1"
         )
         return cursor.fetchone() is not None
 
     def has_product_detail_work(self) -> bool:
+        """Return ``True`` when product detail scraping is still required.
+
+        Türkçe: Ürün detay taraması gerektiren kayıt olup olmadığını bildirir.
+        """
         cursor = self.conn.execute(
             "SELECT 1 FROM products WHERE details_scraped = 0 LIMIT 1"
         )
@@ -587,6 +792,10 @@ class INCIScraper:
 
     @staticmethod
     def _log_progress(stage: str, processed: int, total: int, *, extra: str | None = None) -> None:
+        """Log a progress message for long running stages.
+
+        Türkçe: Uzun süren aşamalar için ilerleme bilgisini günlükler.
+        """
         if total > 0:
             percent = (processed / total) * 100
             message = f"{stage} progress: {processed}/{total} ({percent:.1f}%)"
@@ -597,6 +806,10 @@ class INCIScraper:
         LOGGER.info(message)
 
     def get_workload_summary(self) -> Dict[str, Optional[int]]:
+        """Return a snapshot summarising remaining scraping work.
+
+        Türkçe: Kalan scraping iş yükünü özetleyen bir sözlük döndürür.
+        """
         brand_count = self.conn.execute("SELECT COUNT(*) FROM brands").fetchone()[0]
         product_count = self.conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
         brands_pending_products = self.conn.execute(
@@ -626,6 +839,10 @@ class INCIScraper:
     # Brand scraping helpers
     # ------------------------------------------------------------------
     def _parse_brand_list(self, html: str) -> List[Tuple[str, str]]:
+        """Extract brand names and URLs from a listing page.
+
+        Türkçe: Marka listeleme sayfasından marka adlarını ve URL'lerini çıkarır.
+        """
         root = parse_html(html)
         anchors: List[Node] = []
         for class_name in ("brand__item", "brand-card", "brandlist__item"):
@@ -652,6 +869,10 @@ class INCIScraper:
         return brands
 
     def _insert_brand(self, name: str, url: str) -> int:
+        """Persist a brand if it does not already exist.
+
+        Türkçe: Marka daha önce eklenmediyse veritabanına kaydeder.
+        """
         cur = self.conn.execute(
             "INSERT OR IGNORE INTO brands (name, url) VALUES (?, ?)",
             (name, url),
@@ -665,6 +886,10 @@ class INCIScraper:
     def _collect_products_for_brand(
         self, brand_id: int, brand_url: str, *, start_offset: int = 1
     ) -> Tuple[int, bool, int]:
+        """Walk through paginated product listings for a brand.
+
+        Türkçe: Bir marka için sayfalanmış ürün listelerini dolaşır.
+        """
         offset = start_offset
         total = 0
         fallback_attempted = False
@@ -711,6 +936,10 @@ class INCIScraper:
             time.sleep(REQUEST_SLEEP)
 
     def _retry_incomplete_brand_products(self) -> None:
+        """Requeue brands that were marked complete without stored products.
+
+        Türkçe: Ürünü olmayan ancak tamamlandı işaretli markaları yeniden kuyruğa alır.
+        """
         cursor = self.conn.execute(
             """
             SELECT b.id, b.name
@@ -740,6 +969,10 @@ class INCIScraper:
         self.conn.commit()
 
     def _count_products_for_brand(self, brand_id: int) -> int:
+        """Return how many products have been stored for the brand.
+
+        Türkçe: Belirtilen marka için kaydedilen ürün sayısını verir.
+        """
         cursor = self.conn.execute(
             "SELECT COUNT(*) FROM products WHERE brand_id = ?",
             (brand_id,),
@@ -747,6 +980,10 @@ class INCIScraper:
         return cursor.fetchone()[0]
 
     def _parse_product_list(self, html: str) -> List[Tuple[str, str]]:
+        """Extract product names and URLs from a listing page.
+
+        Türkçe: Ürün listeleme sayfasından ürün adlarını ve URL'lerini çıkarır.
+        """
         root = parse_html(html)
         anchors: List[Node] = []
         for class_name in ("productlist__item", "product-card", "product__item"):
@@ -772,6 +1009,10 @@ class INCIScraper:
         return products
 
     def _insert_product(self, brand_id: int, name: str, url: str) -> int:
+        """Persist a product, updating its name if it already exists.
+
+        Türkçe: Ürünü kaydeder; varsa adını günceller.
+        """
         cur = self.conn.execute(
             "INSERT OR IGNORE INTO products (brand_id, name, url) VALUES (?, ?, ?)",
             (brand_id, name, url),
@@ -785,6 +1026,10 @@ class INCIScraper:
     # Product detail parsing
     # ------------------------------------------------------------------
     def _parse_product_page(self, html: str) -> Optional[ProductDetails]:
+        """Parse a product detail page into structured information.
+
+        Türkçe: Bir ürün detay sayfasını yapılandırılmış bilgilere dönüştürür.
+        """
         root = parse_html(html)
         product_block = root.find(class_="detailpage") or root
         name_node = product_block.find(id_="product-title") or root.find(id_="product-title")
@@ -823,6 +1068,10 @@ class INCIScraper:
         )
 
     def _extract_product_image(self, product_block: Node) -> Optional[str]:
+        """Retrieve the absolute URL of the primary product image.
+
+        Türkçe: Ürünün ana görselinin mutlak URL'sini döndürür.
+        """
         for node in product_block.find_all(tag="img"):
             src = node.get("data-src") or node.get("src")
             if not src:
@@ -832,6 +1081,10 @@ class INCIScraper:
         return None
 
     def _build_tooltip_index(self, root: Node) -> Dict[str, Node]:
+        """Map tooltip identifiers to their DOM nodes for quick lookup.
+
+        Türkçe: Tooltip kimliklerini hızlı erişim için ilgili düğümlere eşler.
+        """
         index: Dict[str, Node] = {}
         for node in root.find_all(class_="tooltip_templates"):
             tooltip_id = node.get("id")
@@ -844,6 +1097,10 @@ class INCIScraper:
         product_block: Node,
         tooltip_map: Dict[str, Node],
     ) -> List[IngredientReference]:
+        """Gather ingredient references from the product summary section.
+
+        Türkçe: Ürün özet bölümünden bileşen referanslarını toplar.
+        """
         container = product_block.find(id_="ingredlist-short")
         if not container:
             container = product_block.find(class_="ingredlist-short")
@@ -885,6 +1142,10 @@ class INCIScraper:
         return ingredients
 
     def _find_tooltip_anchor(self, node: Node) -> Optional[Node]:
+        """Locate the tooltip icon associated with ``node``.
+
+        Türkçe: Düğümle ilişkili tooltip simgesini bulur.
+        """
         current = node.parent
         while current is not None:
             tooltip = current.find(class_="info-circle-ingred-short")
@@ -896,6 +1157,10 @@ class INCIScraper:
         return node.parent.find(class_="info-circle-ingred-short") if node.parent else None
 
     def _extract_ingredient_functions(self, root: Node) -> List[IngredientFunction]:
+        """Parse the ingredient function table displayed on the page.
+
+        Türkçe: Sayfadaki bileşen fonksiyonu tablosunu çözümler.
+        """
         section = root.find(id_="ingredlist-table-section")
         if not section:
             return []
@@ -935,6 +1200,10 @@ class INCIScraper:
         return rows
 
     def _extract_highlights(self, root: Node) -> ProductHighlights:
+        """Collect highlight hashtags and ingredient groupings.
+
+        Türkçe: Hashtag vurgularını ve bileşen gruplarını toplar.
+        """
         section = root.find(id_="ingredlist-highlights-section")
         hashtags: List[str] = []
         key_entries: List[HighlightEntry] = []
@@ -995,6 +1264,10 @@ class INCIScraper:
         details: ProductDetails,
         image_path: Optional[str],
     ) -> None:
+        """Persist the parsed product details and ingredient links.
+
+        Türkçe: Ayrıştırılan ürün detaylarını ve bileşen ilişkilerini kaydeder.
+        """
         self.conn.execute(
             "DELETE FROM product_ingredients WHERE product_id = ?",
             (product_id,),
@@ -1074,6 +1347,10 @@ class INCIScraper:
         )
 
     def _ensure_ingredient(self, ingredient: IngredientReference) -> int:
+        """Ensure an ingredient record exists and return its identifier.
+
+        Türkçe: Bileşen kaydını oluşturup kimliğini döndürür.
+        """
         row = self.conn.execute(
             "SELECT id FROM ingredients WHERE url = ?",
             (ingredient.url,),
@@ -1103,6 +1380,10 @@ class INCIScraper:
     # Ingredient scraping & persistence
     # ------------------------------------------------------------------
     def _scrape_ingredient_page(self, url: str) -> IngredientDetails:
+        """Download and parse a single ingredient page.
+
+        Türkçe: Tek bir bileşen sayfasını indirip ayrıştırır.
+        """
         LOGGER.info("Fetching ingredient details %s", url)
         html = self._fetch_html(url)
         if html is None:
@@ -1110,6 +1391,11 @@ class INCIScraper:
         return self._parse_ingredient_page(html, url)
 
     def _parse_ingredient_page(self, html: str, url: str) -> IngredientDetails:
+        """Convert ingredient HTML into a structured :class:`IngredientDetails`.
+
+        Türkçe: Bileşen HTML içeriğini yapılandırılmış :class:`IngredientDetails`
+        nesnesine dönüştürür.
+        """
         root = parse_html(html)
         name_node = root.find(tag="h1", class_="klavikab") or root.find(tag="h1")
         rating_node = root.find(class_="ourtake")
@@ -1141,6 +1427,10 @@ class INCIScraper:
         )
 
     def _build_label_map(self, root: Node) -> Dict[str, Node]:
+        """Associate label slugs with their corresponding value nodes.
+
+        Türkçe: Etiket anahtarlarını ilgili değer düğümleriyle eşler.
+        """
         label_map: Dict[str, Node] = {}
         for label in root.find_all(class_="label"):
             text = extract_text(label).lower().strip(":")
@@ -1151,6 +1441,10 @@ class INCIScraper:
         return label_map
 
     def _find_value_node(self, label_node: Node) -> Optional[Node]:
+        """Locate the value container associated with ``label_node``.
+
+        Türkçe: Verilen etiket düğümüne karşılık gelen değer düğümünü bulur.
+        """
         parent = label_node.parent
         if not parent:
             return None
@@ -1163,6 +1457,10 @@ class INCIScraper:
         return None
 
     def _extract_label_text(self, node: Optional[Node]) -> str:
+        """Extract and normalise text from a label value node.
+
+        Türkçe: Etiket değer düğümündeki metni çıkarıp normalleştirir.
+        """
         if not node:
             return ""
         text = extract_text(node)
@@ -1171,6 +1469,10 @@ class INCIScraper:
     def _parse_ingredient_functions(
         self, node: Optional[Node]
     ) -> List[IngredientFunctionInfo]:
+        """Derive ingredient functions from structured or plain text blocks.
+
+        Türkçe: Yapılandırılmış veya düz metin bloklarından bileşen fonksiyonlarını türetir.
+        """
         if not node:
             return []
         functions: List[IngredientFunctionInfo] = []
@@ -1196,6 +1498,10 @@ class INCIScraper:
         return functions
 
     def _parse_cosing_section(self, root: Node) -> Dict[str, str]:
+        """Parse the COSING information table into a dictionary.
+
+        Türkçe: COSING bilgi tablosunu sözlüğe dönüştürür.
+        """
         section = root.find(id_="cosing-data")
         empty = {
             "all_functions": "",
@@ -1235,6 +1541,10 @@ class INCIScraper:
         return values
 
     def _iter_next_content(self, node: Node) -> Iterable:
+        """Yield sibling content items following ``node``.
+
+        Türkçe: Düğümden sonra gelen kardeş içerik öğelerini sırasıyla döndürür.
+        """
         parent = node.parent
         if not parent:
             return []
@@ -1248,11 +1558,19 @@ class INCIScraper:
             yield item
 
     def _normalize_whitespace(self, value: str) -> str:
+        """Collapse whitespace runs and trim the string.
+
+        Türkçe: Boşluk dizilerini tek boşluğa indirger ve metni kırpar.
+        """
         value = value.strip()
         value = re.sub(r"\s+", " ", value)
         return value
 
     def _fetch_function_description(self, url: Optional[str]) -> str:
+        """Retrieve the textual description of a cosmetic function.
+
+        Türkçe: Kozmetik fonksiyon tanımının metin içeriğini getirir.
+        """
         if not url:
             return ""
         if url in self._function_description_cache:
@@ -1271,6 +1589,10 @@ class INCIScraper:
         return description
 
     def _parse_details_text(self, root: Node) -> str:
+        """Extract the free-form descriptive text from the ingredient page.
+
+        Türkçe: Bileşen sayfasındaki serbest biçimli açıklama metnini çıkarır.
+        """
         section = root.find(id_="showmore-section-details") or root.find(id_="details")
         if not section:
             return ""
@@ -1286,6 +1608,10 @@ class INCIScraper:
         return "\n\n".join(paragraphs)
 
     def _store_ingredient_details(self, details: IngredientDetails) -> int:
+        """Persist ingredient metadata and return the database identifier.
+
+        Türkçe: Bileşen metadatasını kaydedip veritabanı kimliğini döndürür.
+        """
         function_ids: List[int] = []
         for function in details.functions:
             function_id = self._ensure_ingredient_function(function)
@@ -1340,6 +1666,10 @@ class INCIScraper:
         return row["id"]
 
     def _ensure_ingredient_function(self, info: IngredientFunctionInfo) -> Optional[int]:
+        """Ensure an ingredient function entry exists and return its id.
+
+        Türkçe: Bileşen fonksiyonu kaydını oluşturup kimliğini döndürür.
+        """
         name = info.name.strip()
         url = info.url
         description = info.description.strip()
@@ -1387,12 +1717,20 @@ class INCIScraper:
     # Networking helpers
     # ------------------------------------------------------------------
     def _fetch_html(self, url: str, *, attempts: int = 3) -> Optional[str]:
+        """Download ``url`` and return decoded HTML content.
+
+        Türkçe: Belirtilen ``url`` adresini indirip çözümlenmiş HTML olarak döndürür.
+        """
         data = self._fetch(url, attempts=attempts)
         if data is None:
             return None
         return data.decode("utf-8", errors="replace")
 
     def _fetch(self, url: str, *, attempts: int = 3) -> Optional[bytes]:
+        """Download a resource with retry and failover logic.
+
+        Türkçe: Yeniden deneme ve alternatif host mantığıyla kaynak indirir.
+        """
         delay = REQUEST_SLEEP
         original_parts = parse.urlsplit(url)
         current_url = self._apply_host_override(url)
@@ -1474,6 +1812,10 @@ class INCIScraper:
     def _fetch_via_direct_ip(
         self, parts: parse.SplitResult, ip_address: str
     ) -> Optional[bytes]:
+        """Attempt an HTTPS request by connecting directly to ``ip_address``.
+
+        Türkçe: Doğrudan ``ip_address`` üzerinden HTTPS isteği yapmayı dener.
+        """
         if parts.scheme != "https":
             return None
 
@@ -1521,6 +1863,10 @@ class INCIScraper:
         return None
 
     def _apply_host_override(self, url: str) -> str:
+        """Rewrite ``url`` to use a previously successful fallback host.
+
+        Türkçe: Daha önce başarılı olan alternatif host'u kullanacak şekilde URL'yi yeniden yazar.
+        """
         parts = parse.urlsplit(url)
         host = parts.hostname
         if not host:
@@ -1532,6 +1878,10 @@ class INCIScraper:
         return replacement or url
 
     def _resolve_host_via_doh(self, hostname: str) -> Optional[str]:
+        """Resolve ``hostname`` via DNS-over-HTTPS, returning an IPv4 string.
+
+        Türkçe: ``hostname`` değerini DNS-over-HTTPS kullanarak çözer ve IPv4 adresi döndürür.
+        """
         resolver_endpoint = os.environ.get(
             "INCISCRAPER_DOH_ENDPOINT", "https://dns.google/resolve"
         )
@@ -1558,6 +1908,10 @@ class INCIScraper:
         return None
 
     def _download_doh_payload(self, doh_url: str) -> Optional[Dict[str, object]]:
+        """Fetch a DNS-over-HTTPS JSON response.
+
+        Türkçe: DNS-over-HTTPS JSON yanıtını indirir.
+        """
         req = request.Request(
             doh_url,
             headers={
@@ -1582,6 +1936,10 @@ class INCIScraper:
     def _download_doh_payload_via_ip(
         self, doh_url: str
     ) -> Optional[Dict[str, object]]:
+        """Query the DoH endpoint by connecting to a hard-coded IP address.
+
+        Türkçe: DoH uç noktasını sabit IP adresi üzerinden sorgular.
+        """
         parsed = parse.urlsplit(doh_url)
         hostname = parsed.hostname
         if not hostname:
@@ -1631,6 +1989,10 @@ class INCIScraper:
 
     @staticmethod
     def _doh_ip_override() -> Dict[str, str]:
+        """Return hard coded DNS-over-HTTPS host to IP overrides.
+
+        Türkçe: DNS-over-HTTPS sunucuları için kullanılan sabit IP eşleştirmelerini döndürür.
+        """
         return {
             "dns.google": "8.8.8.8",
             "dns.google.com": "8.8.8.8",
@@ -1640,9 +2002,17 @@ class INCIScraper:
     def _build_host_alternatives(
         self, base_url: str, alternate_base_urls: Iterable[str]
     ) -> Dict[str, List[str]]:
+        """Compute fallback hostnames that can serve INCIDecoder content.
+
+        Türkçe: INCIDecoder içeriğini sunabilecek alternatif ana makineleri hesaplar.
+        """
         hosts: List[str] = []
 
         def _ensure_host(value: Optional[str]) -> None:
+            """Add a host to the list if it has not been seen before.
+
+            Türkçe: Yeni host değerini daha önce eklenmediyse listeye ilave eder.
+            """
             if value and value not in hosts:
                 hosts.append(value)
 
@@ -1673,6 +2043,10 @@ class INCIScraper:
         return alternatives
 
     def _replace_host(self, parts: parse.SplitResult, new_host: str) -> Optional[str]:
+        """Construct a new URL replacing the hostname with ``new_host``.
+
+        Türkçe: Ana makine adını ``new_host`` ile değiştirerek yeni URL üretir.
+        """
         if parts.hostname is None:
             return None
         if parts.username or parts.password:
@@ -1690,6 +2064,10 @@ class INCIScraper:
         product_name: str,
         product_id: int,
     ) -> Optional[str]:
+        """Download, optimise and store a product image on disk.
+
+        Türkçe: Ürün görselini indirir, optimize eder ve diske kaydeder.
+        """
         if not image_url:
             return None
         data = self._fetch(image_url)
@@ -1705,6 +2083,10 @@ class INCIScraper:
         return str(path)
 
     def _compress_image(self, data: bytes, original_suffix: str) -> Tuple[bytes, str]:
+        """Convert raw image ``data`` to an optimised WebP variant when possible.
+
+        Türkçe: Mümkün olduğunda ham görsel verisini optimize edilmiş WebP sürümüne dönüştürür.
+        """
         if Image is None:
             return data, original_suffix
 
@@ -1746,6 +2128,10 @@ class INCIScraper:
         return data, original_suffix
 
     def _extension_to_format(self, suffix: str) -> str:
+        """Translate a filename suffix to a Pillow image format string.
+
+        Türkçe: Dosya uzantısını Pillow'un beklediği görsel formatına çevirir.
+        """
         suffix = suffix.lower().lstrip(".")
         if suffix in {"jpg", "jpeg"}:
             return "JPEG"
@@ -1758,6 +2144,10 @@ class INCIScraper:
         return "PNG"
 
     def _guess_extension(self, url: str) -> str:
+        """Infer the most likely file extension from ``url``.
+
+        Türkçe: Verilen URL'den olası dosya uzantısını tahmin eder.
+        """
         parsed = parse.urlparse(url)
         _, ext = os.path.splitext(parsed.path)
         return ext if ext else ".jpg"
@@ -1766,16 +2156,28 @@ class INCIScraper:
     # Misc helpers
     # ------------------------------------------------------------------
     def _absolute_url(self, href: str) -> str:
+        """Resolve ``href`` relative to the configured base URL.
+
+        Türkçe: Verilen ``href`` değerini temel URL'ye göre mutlak adrese çevirir.
+        """
         if href.startswith("http://") or href.startswith("https://"):
             return href
         return f"{self.base_url}{href}" if href.startswith("/") else href
 
     def _append_offset(self, base_url: str, offset: int) -> str:
+        """Append the pagination offset query parameter to ``base_url``.
+
+        Türkçe: ``base_url`` adresine sayfalama ofseti sorgu parametresi ekler.
+        """
         if "?" in base_url:
             return f"{base_url}&offset={offset}"
         return f"{base_url}?offset={offset}"
 
     def _slugify(self, value: str) -> str:
+        """Generate a filesystem-friendly slug from ``value``.
+
+        Türkçe: Verilen metinden dosya sistemi dostu bir kısa ad üretir.
+        """
         value = value.lower()
         value = re.sub(r"[^a-z0-9]+", "-", value)
         value = value.strip("-")
@@ -1793,10 +2195,18 @@ class _DirectHTTPSConnection(http.client.HTTPSConnection):
         timeout: Optional[float],
         context: ssl.SSLContext,
     ) -> None:
+        """Initialise the HTTPS connection with a custom SNI host.
+
+        Türkçe: TLS SNI adını özelleştirilmiş şekilde ayarlayarak HTTPS bağlantısını başlatır.
+        """
         super().__init__(host, timeout=timeout, context=context)
         self._server_hostname = server_hostname
 
     def connect(self) -> None:  # pragma: no cover - exercised via network operations
+        """Open the socket and perform TLS handshake using the override host.
+
+        Türkçe: Soketi açar ve TLS el sıkışmasını belirtilen sunucu adıyla gerçekleştirir.
+        """
         conn = socket.create_connection(
             (self.host, self.port), self.timeout, self.source_address
         )
