@@ -2112,11 +2112,42 @@ class INCIScraper:
         """
         if not value:
             return []
-        parts = [
-            self._normalize_whitespace(part)
-            for part in re.split(r"[,;]", value)
-        ]
-        return [part for part in parts if part]
+
+        parts: List[str] = []
+        current: List[str] = []
+
+        for index, char in enumerate(value):
+            if char in ",;":
+                if char == "," and self._comma_joins_numeric_tokens(value, index):
+                    current.append(char)
+                    continue
+
+                piece = self._normalize_whitespace("".join(current))
+                if piece:
+                    parts.append(piece)
+                current = []
+                continue
+
+            current.append(char)
+
+        tail = self._normalize_whitespace("".join(current))
+        if tail:
+            parts.append(tail)
+
+        return parts
+
+    def _comma_joins_numeric_tokens(self, value: str, index: int) -> bool:
+        """Return ``True`` if a comma links numeric fragments within ``value``."""
+
+        before = value[:index]
+        after = value[index + 1 :]
+
+        prev_match = re.search(r"(\d[\d'\"’”′″]*)\s*$", before)
+        if not prev_match:
+            return False
+
+        next_match = re.match(r"\s*[\d'\"’”′″]+", after)
+        return bool(next_match)
 
     def _normalise_cosing_identifiers(
         self,
