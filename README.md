@@ -31,8 +31,9 @@ scraper sunar.
 - **Zengin bileşen içerikleri:** Detay metni paragrafların yanı sıra madde
   işaretli listeleri de koruyacak biçimde ayrıştırılır; Quick Facts, Show me
   some proof ve "Ph. Eur. Name" alanları JSON olarak saklanır. COSING bölümünde
-  yanlış formatlanmış kimyasal isimler, CAS ve EC numaraları temizlenir ve çoklu
-  değerler JSON dizileri olarak saklanır.【F:src/inciscraper/scraper.py†L627-L905】【F:src/inciscraper/scraper.py†L1961-L2013】【F:src/inciscraper/scraper.py†L1818-L1881】【F:src/inciscraper/scraper.py†L2118-L2308】
+  yanlış formatlanmış kimyasal isimler, CAS ve EC numaraları temizlenir, satır
+  kırıkları veya tek parça hâlindeki karmaşık isimler heuristik olarak ayrı
+  girdilere bölünür ve çoklu değerler JSON dizileri olarak saklanır.【F:src/inciscraper/scraper.py†L627-L905】【F:src/inciscraper/scraper.py†L1815-L1853】【F:src/inciscraper/scraper.py†L2020-L2109】【F:src/inciscraper/scraper.py†L2155-L2267】【F:src/inciscraper/scraper.py†L2297-L2339】
 - **Vurguları bileşen kayıtlarına bağlama:** "Key Ingredients" ve "Other
   Ingredients" bölümlerinde listelenen öğeler ürünün ana bileşen listesiyle
   eşleştirilir ve sonuçlar JSON formatındaki kimlik listeleri olarak saklanır.【F:src/inciscraper/scraper.py†L1587-L1651】
