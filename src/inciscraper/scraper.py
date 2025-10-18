@@ -250,6 +250,53 @@ class INCIScraper:
         LOGGER.info("Starting product detail collection")
         self.scrape_product_details()
 
+    def generate_sample_dataset(
+        self,
+        *,
+        brand_count: int = 3,
+        products_per_brand: int = 1,
+    ) -> None:
+        """Create a compact dataset used for smoke testing the scraper.
+
+        Türkçe: Scraper'ın hızlı doğrulaması için küçük bir örnek veri seti
+        oluşturur.
+        """
+
+        LOGGER.info(
+            "Preparing clean database state before generating sample dataset",
+        )
+        self.conn.executescript(
+            """
+            DELETE FROM product_ingredients;
+            DELETE FROM products;
+            DELETE FROM ingredients;
+            DELETE FROM ingredient_functions;
+            DELETE FROM brands;
+            DELETE FROM metadata;
+            """
+        )
+        self.conn.commit()
+        for table in (
+            "brands",
+            "products",
+            "ingredients",
+            "ingredient_functions",
+            "product_ingredients",
+        ):
+            self._reset_autoincrement_if_table_empty(table)
+        LOGGER.info(
+            "Collecting %s brand(s) and %s product(s) per brand for sample dataset",
+            brand_count,
+            products_per_brand,
+        )
+        self.scrape_brands(reset_offset=True, max_brands=brand_count)
+        self._set_metadata("brands_complete", "1")
+        self._set_metadata("brands_next_offset", "1")
+        if brand_count:
+            self._set_metadata("brands_total_offsets", str(brand_count))
+        self.scrape_products(max_products_per_brand=products_per_brand)
+        self.scrape_product_details()
+
     def resume_incomplete_metadata(self) -> None:
         """Complete any partial work recorded in the metadata table.
 
@@ -284,6 +331,7 @@ class INCIScraper:
         *,
         reset_offset: bool = False,
         max_pages: int | None = None,
+        max_brands: int | None = None,
     ) -> None:
         """Collect brand listings and persist them to the database.
 
@@ -296,6 +344,15 @@ class INCIScraper:
         if start_offset > 1:
             LOGGER.info("Resuming brand collection from offset %s", start_offset)
         total_offsets_known = int(self._get_metadata("brands_total_offsets", "0") or 0)
+        existing_brand_total = (
+            self.conn.execute("SELECT COUNT(*) FROM brands").fetchone()[0]
+        )
+        if max_brands is not None and existing_brand_total >= max_brands:
+            LOGGER.info(
+                "Brand limit (%s) already satisfied – skipping brand scraping",
+                max_brands,
+            )
+            return
         planned_pages = 0
         if total_offsets_known:
             planned_pages = max(total_offsets_known - start_offset + 1, 0)
@@ -334,11 +391,21 @@ class INCIScraper:
                 completed_normally = True
                 break
             new_entries = 0
+            limit_reached = False
             for name, url in brands:
-                new_entries += self._insert_brand(name, url)
+                inserted = self._insert_brand(name, url)
+                new_entries += inserted
+                if (
+                    inserted
+                    and max_brands is not None
+                    and existing_brand_total + new_entries >= max_brands
+                ):
+                    limit_reached = True
+                    break
             LOGGER.info("Stored %s brands from %s", new_entries, page_url)
             self.conn.commit()
             self._set_metadata("brands_next_offset", str(offset + 1))
+            existing_brand_total += new_entries
             processed_pages += 1
             estimated_total_offsets = max(estimated_total_offsets, offset)
             if processed_pages % PROGRESS_LOG_INTERVAL == 0:
@@ -354,6 +421,12 @@ class INCIScraper:
                     total_for_log,
                     extra=extra,
                 )
+            if limit_reached:
+                LOGGER.info(
+                    "Reached brand limit (%s) – stopping brand scraping early",
+                    max_brands,
+                )
+                break
             offset += 1
             if max_pages is not None and processed_pages >= max_pages:
                 LOGGER.info(
@@ -383,7 +456,12 @@ class INCIScraper:
                 extra=extra,
             )
 
-    def scrape_products(self) -> None:
+    def scrape_products(
+        self,
+        *,
+        max_brands: int | None = None,
+        max_products_per_brand: int | None = None,
+    ) -> None:
         """Discover products for each brand pending product scraping.
 
         Türkçe: Ürün taraması bekleyen markalar için ürünleri keşfeder.
@@ -394,6 +472,8 @@ class INCIScraper:
             "SELECT id, name, url FROM brands WHERE products_scraped = 0 ORDER BY id"
         )
         pending_brands = cursor.fetchall()
+        if max_brands is not None:
+            pending_brands = pending_brands[:max_brands]
         total_brands = len(pending_brands)
         if total_brands == 0:
             LOGGER.info("No brands require product scraping – skipping stage")
@@ -413,7 +493,10 @@ class INCIScraper:
                 )
             LOGGER.info("Collecting products for brand %s (%s)", brand["name"], brand_url)
             products_found, completed, next_offset = self._collect_products_for_brand(
-                brand_id, brand_url, start_offset=start_offset
+                brand_id,
+                brand_url,
+                start_offset=start_offset,
+                max_products=max_products_per_brand,
             )
             self.conn.commit()
             if completed:
@@ -931,7 +1014,12 @@ class INCIScraper:
         return 1
 
     def _collect_products_for_brand(
-        self, brand_id: int, brand_url: str, *, start_offset: int = 1
+        self,
+        brand_id: int,
+        brand_url: str,
+        *,
+        start_offset: int = 1,
+        max_products: Optional[int] = None,
     ) -> Tuple[int, bool, int]:
         """Walk through paginated product listings for a brand.
 
@@ -939,13 +1027,28 @@ class INCIScraper:
         """
         offset = start_offset
         total = 0
+        existing_total = 0
+        if max_products is not None:
+            existing_total = self._count_products_for_brand(brand_id)
+            if existing_total >= max_products:
+                LOGGER.debug(
+                    "Brand %s already has %s product(s) – skipping due to limit",
+                    brand_url,
+                    existing_total,
+                )
+                return 0, True, offset
         fallback_attempted = False
         while True:
             page_url = self._append_offset(brand_url, offset)
             current_url = page_url
             LOGGER.debug("Fetching product listing page %s", current_url)
             html = self._fetch_html(current_url)
-            if html is None and offset == start_offset == 1 and not fallback_attempted:
+            if (
+                html is None
+                and offset == start_offset == 1
+                and not fallback_attempted
+                and page_url != brand_url
+            ):
                 if "?offset=" not in brand_url:
                     LOGGER.debug(
                         "First attempt for %s failed – retrying without offset",
@@ -962,7 +1065,7 @@ class INCIScraper:
                 not products
                 and offset == start_offset == 1
                 and not fallback_attempted
-                and "?offset=" not in brand_url
+                and page_url != brand_url
             ):
                 LOGGER.debug(
                     "First attempt for %s returned no products – retrying without offset",
@@ -978,7 +1081,18 @@ class INCIScraper:
                 LOGGER.debug("No more products found on %s", page_url)
                 return total, True, offset
             for name, url in products:
-                total += self._insert_product(brand_id, name, url)
+                inserted = self._insert_product(brand_id, name, url)
+                total += inserted
+                if (
+                    max_products is not None
+                    and existing_total + total >= max_products
+                ):
+                    LOGGER.debug(
+                        "Reached product limit (%s) for brand %s",
+                        max_products,
+                        brand_url,
+                    )
+                    return total, True, offset
             offset += 1
             time.sleep(REQUEST_SLEEP)
 
@@ -2216,9 +2330,12 @@ class INCIScraper:
 
         Türkçe: ``base_url`` adresine sayfalama ofseti sorgu parametresi ekler.
         """
+        if offset <= 1:
+            return base_url
+        offset_value = offset - 1
         if "?" in base_url:
-            return f"{base_url}&offset={offset}"
-        return f"{base_url}?offset={offset}"
+            return f"{base_url}&offset={offset_value}"
+        return f"{base_url}?offset={offset_value}"
 
     def _slugify(self, value: str) -> str:
         """Generate a filesystem-friendly slug from ``value``.

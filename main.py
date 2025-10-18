@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+from pathlib import Path
 from inciscraper import INCIScraper
 
 
@@ -72,6 +73,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Logging verbosity",
     )
+    parser.add_argument(
+        "--sample-data",
+        action="store_true",
+        help=(
+            "Generate a small verification dataset instead of running the full pipeline. "
+            "The sample database will contain three brands with a single fully scraped "
+            "product each."
+        ),
+    )
     return parser
 
 
@@ -99,52 +109,62 @@ def main(argv: list[str] | None = None) -> int:
     if args.max_pages is not None and args.max_pages < 1:
         parser.error("--max-pages must be a positive integer")
     configure_logging(args.log_level)
+    db_path = args.db
+    if args.sample_data:
+        db_path_obj = Path(db_path)
+        if not db_path_obj.name.startswith("sample_"):
+            db_path_obj = db_path_obj.with_name(f"sample_{db_path_obj.name}")
+        db_path = str(db_path_obj)
     scraper = INCIScraper(
-        db_path=args.db,
+        db_path=db_path,
         image_dir=args.images_dir,
         base_url=args.base_url,
         alternate_base_urls=args.alternate_base_url,
     )
     try:
-        scraper.resume_incomplete_metadata()
-        summary = scraper.get_workload_summary()
-        brand_pages_remaining = summary["brand_pages_remaining"]
-        brand_pages_text = (
-            str(brand_pages_remaining) if brand_pages_remaining is not None else "unknown"
-        )
-        logging.info(
-            "Initial workload – brand pages remaining: %s, brands pending products: %s, products pending details: %s",
-            brand_pages_text,
-            summary["brands_pending_products"],
-            summary["products_pending_details"],
-        )
-        logging.info(
-            "Database snapshot – stored brands: %s, stored products: %s",
-            summary["brands_total"],
-            summary["products_total"],
-        )
-        if args.step in {"all", "brands"}:
-            if args.step == "brands" or not args.resume or scraper.has_brand_work():
-                scraper.scrape_brands(
-                    reset_offset=not args.resume,
-                    max_pages=args.max_pages,
-                )
-            else:
-                logging.info("Skipping brand collection – already complete")
-        if args.step in {"all", "products"}:
-            if args.step == "products" or not args.resume or scraper.has_product_work():
-                scraper.scrape_products()
-            else:
-                logging.info("Skipping product collection – nothing left to do")
-        if args.step in {"all", "details"}:
-            if (
-                args.step == "details"
-                or not args.resume
-                or scraper.has_product_detail_work()
-            ):
-                scraper.scrape_product_details()
-            else:
-                logging.info("Skipping product detail collection – nothing left to do")
+        if args.sample_data:
+            logging.info("Generating sample dataset (3 brands × 1 product each)")
+            scraper.generate_sample_dataset(brand_count=3, products_per_brand=1)
+        else:
+            scraper.resume_incomplete_metadata()
+            summary = scraper.get_workload_summary()
+            brand_pages_remaining = summary["brand_pages_remaining"]
+            brand_pages_text = (
+                str(brand_pages_remaining) if brand_pages_remaining is not None else "unknown"
+            )
+            logging.info(
+                "Initial workload – brand pages remaining: %s, brands pending products: %s, products pending details: %s",
+                brand_pages_text,
+                summary["brands_pending_products"],
+                summary["products_pending_details"],
+            )
+            logging.info(
+                "Database snapshot – stored brands: %s, stored products: %s",
+                summary["brands_total"],
+                summary["products_total"],
+            )
+            if args.step in {"all", "brands"}:
+                if args.step == "brands" or not args.resume or scraper.has_brand_work():
+                    scraper.scrape_brands(
+                        reset_offset=not args.resume,
+                        max_pages=args.max_pages,
+                    )
+                else:
+                    logging.info("Skipping brand collection – already complete")
+            if args.step in {"all", "products"}:
+                if args.step == "products" or not args.resume or scraper.has_product_work():
+                    scraper.scrape_products()
+                else:
+                    logging.info("Skipping product collection – nothing left to do")
+            if args.step in {"all", "details"}:
+                if (
+                    args.step == "details"
+                    or not args.resume
+                    or scraper.has_product_detail_work()
+                ):
+                    scraper.scrape_product_details()
+                else:
+                    logging.info("Skipping product detail collection – nothing left to do")
     finally:
         scraper.close()
     return 0

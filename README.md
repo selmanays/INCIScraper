@@ -66,6 +66,19 @@ python main.py
 Scraper başlarken veritabanındaki durumu özetler, ardından eksik adımları
 çalıştırır ve sonunda bağlantıyı kapatır.【F:main.py†L63-L118】
 
+### Örnek Veri Tabanı Oluşturma
+
+Uygulamanın çalışma zincirini hızlıca doğrulamak için yalnızca üç marka ve her
+markadan bir ürün içeren örnek bir veritabanı oluşturabilirsiniz. Komut,
+veritabanı dosya adınızın başına otomatik olarak `sample_` öneki ekler.
+
+```bash
+python main.py --sample-data --db incidecoder.db
+```
+
+Bu işlem ilgili markaların ürün detaylarını da kazır ve sonuçları sıkıştırılmış
+görsellerle birlikte kaydeder.【F:main.py†L96-L118】【F:src/inciscraper/scraper.py†L253-L298】
+
 ## Komut Satırı Parametreleri
 
 | Parametre | Açıklama |
@@ -78,6 +91,7 @@ Scraper başlarken veritabanındaki durumu özetler, ardından eksik adımları
 | `--max-pages N` | Marka listelemede çekilecek sayfa sayısını sınırlar. |
 | `--resume/--no-resume` | `all` adımı çalışırken tamamlanmış aşamaları atlayıp atlamayacağını belirler. |
 | `--log-level LEVEL` | Günlük çıktısının ayrıntı düzeyini ayarlar. |
+| `--sample-data` | Tüm pipeline yerine üç marka × bir ürünlük örnek veritabanı oluşturur (`sample_` öneki eklenir). |
 
 Negatif veya sıfır `--max-pages` değerleri kabul edilmez; CLI uygun hatayı
 verir.【F:main.py†L55-L69】
