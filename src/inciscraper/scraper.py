@@ -59,6 +59,7 @@ EXPECTED_SCHEMA: Dict[str, Set[str]] = {
         "url",
         "description",
         "image_path",
+        "ingredient_ids_json",
         "ingredient_functions_json",
         "highlights_json",
         "discontinued",
@@ -71,14 +72,22 @@ EXPECTED_SCHEMA: Dict[str, Set[str]] = {
         "url",
         "rating_tag",
         "also_called",
-        "what_it_does_json",
-        "what_it_does_links_json",
+        "function_ids_json",
         "irritancy",
         "comedogenicity",
-        "tooltip_links_json",
-        "official_cosing_json",
-        "details_section_html",
-        "details_links_json",
+        "details_text",
+        "cosing_all_functions",
+        "cosing_description",
+        "cosing_cas",
+        "cosing_ec",
+        "cosing_chemical_name",
+        "cosing_restrictions",
+    },
+    "ingredient_functions": {
+        "id",
+        "name",
+        "url",
+        "description",
     },
     "product_ingredients": {
         "product_id",
@@ -96,6 +105,7 @@ class IngredientReference:
     url: str
     tooltip_text: Optional[str]
     tooltip_ingredient_link: Optional[str]
+    ingredient_id: Optional[int] = None
 
 
 @dataclass
@@ -139,14 +149,23 @@ class IngredientDetails:
     url: str
     rating_tag: str
     also_called: str
-    what_it_does: List[str]
-    what_it_does_links: List[str]
+    functions: List["IngredientFunctionInfo"]
     irritancy: str
     comedogenicity: str
-    tooltip_links: List[str]
-    official_cosing: Dict[str, str]
-    details_section: str
-    details_links: List[str]
+    details_text: str
+    cosing_all_functions: str
+    cosing_description: str
+    cosing_cas: str
+    cosing_ec: str
+    cosing_chemical_name: str
+    cosing_restrictions: str
+
+
+@dataclass
+class IngredientFunctionInfo:
+    name: str
+    url: Optional[str]
+    description: str
 
 
 class INCIScraper:
@@ -168,6 +187,7 @@ class INCIScraper:
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self._init_db()
+        self._function_description_cache: Dict[str, str] = {}
         self._host_failover: Dict[str, str] = {}
         self._host_ip_overrides: Dict[str, str] = {}
         self._host_alternatives = self._build_host_alternatives(
@@ -416,6 +436,7 @@ class INCIScraper:
     # ------------------------------------------------------------------
     def _init_db(self) -> None:
         cursor = self.conn.cursor()
+        self._enforce_schema()
         cursor.executescript(
             """
             CREATE TABLE IF NOT EXISTS brands (
@@ -432,6 +453,7 @@ class INCIScraper:
                 url TEXT NOT NULL UNIQUE,
                 description TEXT,
                 image_path TEXT,
+                ingredient_ids_json TEXT,
                 ingredient_functions_json TEXT,
                 highlights_json TEXT,
                 discontinued INTEGER NOT NULL DEFAULT 0,
@@ -445,14 +467,23 @@ class INCIScraper:
                 url TEXT NOT NULL UNIQUE,
                 rating_tag TEXT,
                 also_called TEXT,
-                what_it_does_json TEXT,
-                what_it_does_links_json TEXT,
+                function_ids_json TEXT,
                 irritancy TEXT,
                 comedogenicity TEXT,
-                tooltip_links_json TEXT,
-                official_cosing_json TEXT,
-                details_section_html TEXT,
-                details_links_json TEXT
+                details_text TEXT,
+                cosing_all_functions TEXT,
+                cosing_description TEXT,
+                cosing_cas TEXT,
+                cosing_ec TEXT,
+                cosing_chemical_name TEXT,
+                cosing_restrictions TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS ingredient_functions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                url TEXT UNIQUE,
+                description TEXT
             );
 
             CREATE TABLE IF NOT EXISTS product_ingredients (
@@ -470,9 +501,6 @@ class INCIScraper:
             """
         )
         self.conn.commit()
-        self._ensure_column("products", "discontinued", "INTEGER NOT NULL DEFAULT 0")
-        self._ensure_column("products", "replacement_product_url", "TEXT")
-        self._enforce_schema()
 
     # ------------------------------------------------------------------
     # Metadata helpers
@@ -514,15 +542,6 @@ class INCIScraper:
             return True
         return False
 
-    def _ensure_column(self, table: str, column: str, definition: str) -> None:
-        cursor = self.conn.execute(f"PRAGMA table_info({table})")
-        columns = [row["name"] for row in cursor.fetchall()]
-        if column not in columns:
-            self.conn.execute(
-                f"ALTER TABLE {table} ADD COLUMN {column} {definition}"
-            )
-            self.conn.commit()
-
     def _enforce_schema(self) -> None:
         cursor = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
         existing_tables = {row["name"] for row in cursor.fetchall()}
@@ -534,11 +553,18 @@ class INCIScraper:
                 self.conn.execute(f"DROP TABLE IF EXISTS {table}")
         for table, expected_columns in EXPECTED_SCHEMA.items():
             cursor = self.conn.execute(f"PRAGMA table_info({table})")
-            actual_columns = {row["name"] for row in cursor.fetchall()}
-            extra_columns = actual_columns - expected_columns
-            for column in extra_columns:
-                LOGGER.info("Dropping unexpected column %s.%s", table, column)
-                self.conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+            rows = cursor.fetchall()
+            if not rows:
+                continue
+            actual_columns = {row["name"] for row in rows}
+            if actual_columns != expected_columns:
+                LOGGER.info(
+                    "Recreating table %s due to schema mismatch (expected: %s, found: %s)",
+                    table,
+                    sorted(expected_columns),
+                    sorted(actual_columns),
+                )
+                self.conn.execute(f"DROP TABLE IF EXISTS {table}")
         self.conn.commit()
 
     # ------------------------------------------------------------------
@@ -970,17 +996,41 @@ class INCIScraper:
         image_path: Optional[str],
     ) -> None:
         self.conn.execute(
+            "DELETE FROM product_ingredients WHERE product_id = ?",
+            (product_id,),
+        )
+        ingredient_ids: List[int] = []
+        for ingredient in details.ingredients:
+            ingredient_id = self._ensure_ingredient(ingredient)
+            ingredient.ingredient_id = ingredient_id
+            ingredient_ids.append(ingredient_id)
+            self.conn.execute(
+                """
+                INSERT OR REPLACE INTO product_ingredients
+                (product_id, ingredient_id, tooltip_text, tooltip_ingredient_link)
+                VALUES (?, ?, ?, ?)
+                """,
+                (
+                    product_id,
+                    ingredient_id,
+                    ingredient.tooltip_text,
+                    ingredient.tooltip_ingredient_link,
+                ),
+            )
+        self.conn.execute(
             """
             UPDATE products
             SET name = ?, description = ?, image_path = ?,
-                ingredient_functions_json = ?, highlights_json = ?,
-                discontinued = ?, replacement_product_url = ?
+                ingredient_ids_json = ?, ingredient_functions_json = ?,
+                highlights_json = ?, discontinued = ?,
+                replacement_product_url = ?
             WHERE id = ?
             """,
             (
                 details.name,
                 details.description,
                 image_path,
+                json.dumps(ingredient_ids, ensure_ascii=False),
                 json.dumps(
                     [
                         {
@@ -1022,25 +1072,6 @@ class INCIScraper:
                 product_id,
             ),
         )
-        self.conn.execute(
-            "DELETE FROM product_ingredients WHERE product_id = ?",
-            (product_id,),
-        )
-        for ingredient in details.ingredients:
-            ingredient_id = self._ensure_ingredient(ingredient)
-            self.conn.execute(
-                """
-                INSERT OR REPLACE INTO product_ingredients
-                (product_id, ingredient_id, tooltip_text, tooltip_ingredient_link)
-                VALUES (?, ?, ?, ?)
-                """,
-                (
-                    product_id,
-                    ingredient_id,
-                    ingredient.tooltip_text,
-                    ingredient.tooltip_ingredient_link,
-                ),
-            )
 
     def _ensure_ingredient(self, ingredient: IngredientReference) -> int:
         row = self.conn.execute(
@@ -1089,29 +1120,24 @@ class INCIScraper:
         what_it_does_nodes = label_map.get("what-it-does")
         irritancy_node = label_map.get("irritancy")
         comedogenicity_node = label_map.get("comedogenicity")
-        what_it_does = self._extract_list_from_value(what_it_does_nodes)
-        what_it_does_links = self._extract_links_from_value(what_it_does_nodes)
-        tooltip_links: List[str] = []
-        for container in root.find_all(class_="info-circle-comedog-details"):
-            for anchor in container.find_all(tag="a"):
-                href = anchor.get("href")
-                if href:
-                    tooltip_links.append(self._absolute_url(href))
+        functions = self._parse_ingredient_functions(what_it_does_nodes)
         cosing = self._parse_cosing_section(root)
-        details_section_html, details_links = self._parse_details_section(root)
+        details_text = self._parse_details_text(root)
         return IngredientDetails(
             name=name,
             url=url,
             rating_tag=rating_tag,
             also_called=extract_text(also_called_node) if also_called_node else "",
-            what_it_does=what_it_does,
-            what_it_does_links=what_it_does_links,
-            irritancy=extract_text(irritancy_node) if irritancy_node else "",
-            comedogenicity=extract_text(comedogenicity_node) if comedogenicity_node else "",
-            tooltip_links=tooltip_links,
-            official_cosing=cosing,
-            details_section=details_section_html,
-            details_links=details_links,
+            functions=functions,
+            irritancy=self._extract_label_text(irritancy_node),
+            comedogenicity=self._extract_label_text(comedogenicity_node),
+            details_text=details_text,
+            cosing_all_functions=cosing["all_functions"],
+            cosing_description=cosing["description"],
+            cosing_cas=cosing["cas_number"],
+            cosing_ec=cosing["ec_number"],
+            cosing_chemical_name=cosing["chemical_iupac_name"],
+            cosing_restrictions=cosing["cosmetic_restrictions"],
         )
 
     def _build_label_map(self, root: Node) -> Dict[str, Node]:
@@ -1136,39 +1162,64 @@ class INCIScraper:
                 return sibling
         return None
 
-    def _extract_list_from_value(self, node: Optional[Node]) -> List[str]:
+    def _extract_label_text(self, node: Optional[Node]) -> str:
         if not node:
-            return []
-        items: List[str] = []
-        for anchor in node.find_all(tag="a"):
-            text = extract_text(anchor)
-            if text:
-                items.append(text)
-        if not items:
-            text = extract_text(node)
-            if text:
-                items.append(text)
-        return items
+            return ""
+        text = extract_text(node)
+        return self._normalize_whitespace(text)
 
-    def _extract_links_from_value(self, node: Optional[Node]) -> List[str]:
+    def _parse_ingredient_functions(
+        self, node: Optional[Node]
+    ) -> List[IngredientFunctionInfo]:
         if not node:
             return []
-        links: List[str] = []
-        for anchor in node.find_all(tag="a"):
-            href = anchor.get("href")
-            if href:
-                links.append(self._absolute_url(href))
-        return links
+        functions: List[IngredientFunctionInfo] = []
+        anchors = node.find_all(tag="a")
+        if anchors:
+            for anchor in anchors:
+                name = self._normalize_whitespace(extract_text(anchor))
+                href = anchor.get("href")
+                url = self._absolute_url(href) if href else None
+                description = self._fetch_function_description(url) if url else ""
+                if name or url:
+                    functions.append(
+                        IngredientFunctionInfo(name=name, url=url, description=description)
+                    )
+        else:
+            raw_text = self._normalize_whitespace(extract_text(node))
+            if raw_text:
+                for part in re.split(r",\s*", raw_text):
+                    if part:
+                        functions.append(
+                            IngredientFunctionInfo(name=part, url=None, description="")
+                        )
+        return functions
 
     def _parse_cosing_section(self, root: Node) -> Dict[str, str]:
         section = root.find(id_="cosing-data")
+        empty = {
+            "all_functions": "",
+            "description": "",
+            "cas_number": "",
+            "ec_number": "",
+            "chemical_iupac_name": "",
+            "cosmetic_restrictions": "",
+        }
         if not section:
-            return {"all_functions": "", "description": "", "cas_number": "", "ec_number": ""}
-        values: Dict[str, str] = {"all_functions": "", "description": "", "cas_number": "", "ec_number": ""}
+            return empty
+        key_map = {
+            "all functions": "all_functions",
+            "description": "description",
+            "cas #": "cas_number",
+            "ec #": "ec_number",
+            "chemical/iupac name": "chemical_iupac_name",
+            "cosmetic restrictions": "cosmetic_restrictions",
+        }
+        values: Dict[str, str] = dict(empty)
         for bold in section.find_all(tag="b"):
-            label = extract_text(bold).lower().strip(":")
-            key = label.replace(" ", "_")
-            if key not in values:
+            label = extract_text(bold).strip().lower().strip(":")
+            key = key_map.get(label)
+            if not key:
                 continue
             text_parts: List[str] = []
             for item in self._iter_next_content(bold):
@@ -1178,7 +1229,9 @@ class INCIScraper:
                     text_parts.append(extract_text(item))
                 elif isinstance(item, str):
                     text_parts.append(item)
-            values[key] = " ".join(part.strip() for part in text_parts if part).strip()
+            raw_value = " ".join(part.strip() for part in text_parts if part)
+            cleaned = self._normalize_whitespace(raw_value.replace("|", " "))
+            values[key] = cleaned
         return values
 
     def _iter_next_content(self, node: Node) -> Iterable:
@@ -1194,45 +1247,141 @@ class INCIScraper:
                 continue
             yield item
 
-    def _parse_details_section(self, root: Node) -> Tuple[str, List[str]]:
-        section = root.find(id_="details")
+    def _normalize_whitespace(self, value: str) -> str:
+        value = value.strip()
+        value = re.sub(r"\s+", " ", value)
+        return value
+
+    def _fetch_function_description(self, url: Optional[str]) -> str:
+        if not url:
+            return ""
+        if url in self._function_description_cache:
+            return self._function_description_cache[url]
+        html = self._fetch_html(url)
+        if not html:
+            self._function_description_cache[url] = ""
+            return ""
+        root = parse_html(html)
+        content = root.find(id_="content") or root.find(class_="content")
+        if content:
+            description = self._normalize_whitespace(extract_text(content))
+        else:
+            description = ""
+        self._function_description_cache[url] = description
+        return description
+
+    def _parse_details_text(self, root: Node) -> str:
+        section = root.find(id_="showmore-section-details") or root.find(id_="details")
         if not section:
-            return "", []
+            return ""
         content_node = section.find(class_="content") or section
-        paragraphs = [p.get_inner_html() for p in content_node.find_all(tag="p")]
-        links: List[str] = []
-        for anchor in content_node.find_all(tag="a"):
-            href = anchor.get("href")
-            if href:
-                links.append(self._absolute_url(href))
-        return "\n".join(paragraphs), links
+        paragraphs: List[str] = []
+        for paragraph in content_node.find_all(tag="p"):
+            text = self._normalize_whitespace(extract_text(paragraph))
+            if text:
+                paragraphs.append(text)
+        if not paragraphs:
+            text = self._normalize_whitespace(extract_text(content_node))
+            return text
+        return "\n\n".join(paragraphs)
 
     def _store_ingredient_details(self, details: IngredientDetails) -> int:
-        cur = self.conn.execute(
+        function_ids: List[int] = []
+        for function in details.functions:
+            function_id = self._ensure_ingredient_function(function)
+            if function_id is not None:
+                function_ids.append(function_id)
+        self.conn.execute(
             """
             INSERT INTO ingredients (
-                name, url, rating_tag, also_called, what_it_does_json, irritancy,
-                what_it_does_links_json, comedogenicity, tooltip_links_json,
-                official_cosing_json, details_section_html, details_links_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                name, url, rating_tag, also_called, function_ids_json,
+                irritancy, comedogenicity, details_text, cosing_all_functions,
+                cosing_description, cosing_cas, cosing_ec, cosing_chemical_name,
+                cosing_restrictions
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(url) DO UPDATE SET
+                name = excluded.name,
+                rating_tag = excluded.rating_tag,
+                also_called = excluded.also_called,
+                function_ids_json = excluded.function_ids_json,
+                irritancy = excluded.irritancy,
+                comedogenicity = excluded.comedogenicity,
+                details_text = excluded.details_text,
+                cosing_all_functions = excluded.cosing_all_functions,
+                cosing_description = excluded.cosing_description,
+                cosing_cas = excluded.cosing_cas,
+                cosing_ec = excluded.cosing_ec,
+                cosing_chemical_name = excluded.cosing_chemical_name,
+                cosing_restrictions = excluded.cosing_restrictions
             """,
             (
                 details.name,
                 details.url,
                 details.rating_tag,
                 details.also_called,
-                json.dumps(details.what_it_does, ensure_ascii=False),
-                json.dumps(details.what_it_does_links, ensure_ascii=False),
+                json.dumps(function_ids, ensure_ascii=False),
                 details.irritancy,
                 details.comedogenicity,
-                json.dumps(details.tooltip_links, ensure_ascii=False),
-                json.dumps(details.official_cosing, ensure_ascii=False),
-                details.details_section,
-                json.dumps(details.details_links, ensure_ascii=False),
+                details.details_text,
+                details.cosing_all_functions,
+                details.cosing_description,
+                details.cosing_cas,
+                details.cosing_ec,
+                details.cosing_chemical_name,
+                details.cosing_restrictions,
             ),
         )
-        ingredient_id = cur.lastrowid
-        return ingredient_id
+        row = self.conn.execute(
+            "SELECT id FROM ingredients WHERE url = ?",
+            (details.url,),
+        ).fetchone()
+        if not row:
+            raise RuntimeError(f"Unable to store ingredient {details.url}")
+        return row["id"]
+
+    def _ensure_ingredient_function(self, info: IngredientFunctionInfo) -> Optional[int]:
+        name = info.name.strip()
+        url = info.url
+        description = info.description.strip()
+        if not name and not url:
+            return None
+        row = None
+        if url:
+            row = self.conn.execute(
+                "SELECT id, name, description FROM ingredient_functions WHERE url = ?",
+                (url,),
+            ).fetchone()
+        if row is None:
+            row = self.conn.execute(
+                """
+                SELECT id, name, description
+                FROM ingredient_functions
+                WHERE url IS NULL AND name = ?
+                """,
+                (name,),
+            ).fetchone()
+        if row:
+            updates: Dict[str, str] = {}
+            if name and name != row["name"]:
+                updates["name"] = name
+            if description and description != (row["description"] or ""):
+                updates["description"] = description
+            if updates:
+                assignments = ", ".join(f"{col} = ?" for col in updates)
+                params = list(updates.values()) + [row["id"]]
+                self.conn.execute(
+                    f"UPDATE ingredient_functions SET {assignments} WHERE id = ?",
+                    params,
+                )
+            return row["id"]
+        cur = self.conn.execute(
+            """
+            INSERT INTO ingredient_functions (name, url, description)
+            VALUES (?, ?, ?)
+            """,
+            (name, url, description),
+        )
+        return cur.lastrowid
 
     # ------------------------------------------------------------------
     # Networking helpers
