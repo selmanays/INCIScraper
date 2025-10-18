@@ -63,7 +63,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--resume/--no-resume",
         dest="resume",
-        default=True,
+        default=False,
         action=argparse.BooleanOptionalAction,
         help="Skip completed steps when running the full pipeline",
     )
@@ -126,7 +126,8 @@ def main(argv: list[str] | None = None) -> int:
             logging.info("Generating sample dataset (3 brands × 1 product each)")
             scraper.generate_sample_dataset(brand_count=3, products_per_brand=1)
         else:
-            scraper.resume_incomplete_metadata()
+            if args.resume:
+                scraper.resume_incomplete_metadata()
             summary = scraper.get_workload_summary()
             brand_pages_remaining = summary["brand_pages_remaining"]
             brand_pages_text = (
@@ -153,7 +154,7 @@ def main(argv: list[str] | None = None) -> int:
                     logging.info("Skipping brand collection – already complete")
             if args.step in {"all", "products"}:
                 if args.step == "products" or not args.resume or scraper.has_product_work():
-                    scraper.scrape_products()
+                    scraper.scrape_products(rescan_all=not args.resume)
                 else:
                     logging.info("Skipping product collection – nothing left to do")
             if args.step in {"all", "details"}:
@@ -162,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
                     or not args.resume
                     or scraper.has_product_detail_work()
                 ):
-                    scraper.scrape_product_details()
+                    scraper.scrape_product_details(rescan_all=not args.resume)
                 else:
                     logging.info("Skipping product detail collection – nothing left to do")
     finally:
