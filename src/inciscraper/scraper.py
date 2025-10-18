@@ -126,6 +126,51 @@ ADDITIONAL_COLUMN_DEFINITIONS: Dict[str, Dict[str, str]] = {
     },
 }
 
+PRIMARY_KEY_MIGRATION_PLANS: List[Dict[str, str]] = [
+    {
+        "table": "brands",
+        "columns": "id, name, url, products_scraped, last_checked_at, last_updated_at",
+        "select": (
+            "CAST(id AS TEXT) AS id, name, url, products_scraped, last_checked_at, last_updated_at"
+        ),
+    },
+    {
+        "table": "products",
+        "columns": (
+            "id, brand_id, name, url, description, image_path, ingredient_ids_json, "
+            "ingredient_references_json, ingredient_functions_json, highlights_json, "
+            "discontinued, replacement_product_url, details_scraped, last_checked_at, "
+            "last_updated_at"
+        ),
+        "select": (
+            "CAST(id AS TEXT) AS id, CAST(brand_id AS TEXT) AS brand_id, name, url, "
+            "description, image_path, ingredient_ids_json, ingredient_references_json, "
+            "ingredient_functions_json, highlights_json, discontinued, "
+            "replacement_product_url, details_scraped, last_checked_at, last_updated_at"
+        ),
+    },
+    {
+        "table": "ingredients",
+        "columns": (
+            "id, name, url, rating_tag, also_called, function_ids_json, irritancy, "
+            "comedogenicity, details_text, cosing_all_functions, cosing_description, "
+            "cosing_cas, cosing_ec, cosing_chemical_name, cosing_restrictions, "
+            "last_checked_at, last_updated_at"
+        ),
+        "select": (
+            "CAST(id AS TEXT) AS id, name, url, rating_tag, also_called, "
+            "function_ids_json, irritancy, comedogenicity, details_text, "
+            "cosing_all_functions, cosing_description, cosing_cas, cosing_ec, "
+            "cosing_chemical_name, cosing_restrictions, last_checked_at, last_updated_at"
+        ),
+    },
+    {
+        "table": "ingredient_functions",
+        "columns": "id, name, url, description",
+        "select": "CAST(id AS TEXT) AS id, name, url, description",
+    },
+]
+
 
 @dataclass
 class IngredientReference:
@@ -631,6 +676,7 @@ class INCIScraper:
         """
         cursor = self.conn.cursor()
         self._enforce_schema()
+        migrations, foreign_keys_were_enabled = self._prepare_primary_key_migrations()
         cursor.executescript(
             """
             CREATE TABLE IF NOT EXISTS brands (
@@ -693,8 +739,67 @@ class INCIScraper:
             );
             """
         )
+        self._finalise_primary_key_migrations(migrations, foreign_keys_were_enabled)
         self.conn.commit()
         self._ensure_ingredient_details_capacity()
+
+    # ------------------------------------------------------------------
+    # Schema migration helpers
+    # ------------------------------------------------------------------
+    def _prepare_primary_key_migrations(self) -> Tuple[List[Tuple[str, str, str, str]], bool]:
+        """Rename tables that still rely on integer IDs for later rebuilding."""
+
+        migrations: List[Tuple[str, str, str, str]] = []
+        foreign_keys_row = self.conn.execute("PRAGMA foreign_keys").fetchone()
+        foreign_keys_were_enabled = bool(foreign_keys_row[0]) if foreign_keys_row else False
+        if foreign_keys_were_enabled:
+            self.conn.execute("PRAGMA foreign_keys = OFF")
+        for plan in PRIMARY_KEY_MIGRATION_PLANS:
+            table = plan["table"]
+            cursor = self.conn.execute(f"PRAGMA table_info({table})")
+            rows = cursor.fetchall()
+            if not rows:
+                continue
+            id_row = next((row for row in rows if row["name"] == "id"), None)
+            if id_row is None:
+                continue
+            column_type = (id_row["type"] or "").upper()
+            if column_type == "TEXT":
+                continue
+            backup_name = f"{table}_pk_migration_backup"
+            LOGGER.info(
+                "Rebuilding %s table to migrate id column to TEXT (previous type: %s)",
+                table,
+                column_type or "unknown",
+            )
+            self.conn.execute(f"DROP TABLE IF EXISTS {backup_name}")
+            self.conn.execute(f"ALTER TABLE {table} RENAME TO {backup_name}")
+            migrations.append((table, backup_name, plan["columns"], plan["select"]))
+        if migrations:
+            self.conn.commit()
+        elif foreign_keys_were_enabled:
+            # Restore pragma when no migration is required
+            self.conn.execute("PRAGMA foreign_keys = ON")
+        return migrations, foreign_keys_were_enabled
+
+    def _finalise_primary_key_migrations(
+        self, migrations: List[Tuple[str, str, str, str]], foreign_keys_were_enabled: bool
+    ) -> None:
+        """Copy data back into rebuilt tables now using text identifiers."""
+
+        if not migrations:
+            if foreign_keys_were_enabled:
+                self.conn.execute("PRAGMA foreign_keys = ON")
+            return
+        for table, backup_name, columns, select in migrations:
+            LOGGER.info("Copying %s data into TEXT identifier schema", table)
+            self.conn.execute(
+                f"INSERT INTO {table} ({columns}) SELECT {select} FROM {backup_name}"
+            )
+            self.conn.execute(f"DROP TABLE {backup_name}")
+        self.conn.commit()
+        if foreign_keys_were_enabled:
+            self.conn.execute("PRAGMA foreign_keys = ON")
 
     # ------------------------------------------------------------------
     # Metadata helpers
