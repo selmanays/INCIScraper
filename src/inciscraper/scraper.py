@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib import error, parse, request
 
 try:
@@ -46,6 +46,17 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - optional dependency safeguard
     Image = None  # type: ignore[assignment]
     ImageFile = None  # type: ignore[assignment]
+
+try:  # pragma: no cover - optional dependency safeguard
+    from playwright.sync_api import (
+        Error as PlaywrightError,
+        TimeoutError as PlaywrightTimeoutError,
+        sync_playwright,
+    )
+except ModuleNotFoundError:  # pragma: no cover - fallback when Playwright missing
+    PlaywrightError = Exception  # type: ignore[assignment]
+    PlaywrightTimeoutError = TimeoutError  # type: ignore[assignment]
+    sync_playwright = None  # type: ignore[assignment]
 
 from .parser import Node, extract_text, parse_html
 
@@ -103,7 +114,7 @@ EXPECTED_SCHEMA: Dict[str, Set[str]] = {
         "last_checked_at",
         "last_updated_at",
     },
-    "ingredient_functions": {
+    "functions": {
         "id",
         "name",
         "url",
@@ -296,6 +307,11 @@ class INCIScraper:
             self.base_url, alternate_base_urls or []
         )
         self._ssl_context = ssl.create_default_context()
+        self._cosing_playwright: Optional[Any] = None
+        self._cosing_browser: Optional[Any] = None
+        self._cosing_context: Optional[Any] = None
+        self._cosing_page: Optional[Any] = None
+        self._cosing_playwright_failed = False
 
     @staticmethod
     def _generate_id() -> str:
@@ -338,7 +354,7 @@ class INCIScraper:
             """
             DELETE FROM products;
             DELETE FROM ingredients;
-            DELETE FROM ingredient_functions;
+            DELETE FROM functions;
             DELETE FROM frees;
             DELETE FROM brands;
             DELETE FROM metadata;
@@ -654,10 +670,34 @@ class INCIScraper:
                 self._log_progress("Product", processed, total_products)
 
     def close(self) -> None:
-        """Close the underlying SQLite connection.
+        """Close the underlying SQLite connection and release Playwright resources.
 
-        Türkçe: Kullanılan SQLite bağlantısını kapatır.
+        Türkçe: Kullanılan SQLite bağlantısını ve Playwright kaynaklarını kapatır.
         """
+        if self._cosing_page is not None:
+            try:
+                self._cosing_page.close()
+            except PlaywrightError:
+                LOGGER.debug("Ignoring Playwright page close error", exc_info=True)
+            self._cosing_page = None
+        if self._cosing_context is not None:
+            try:
+                self._cosing_context.close()
+            except PlaywrightError:
+                LOGGER.debug("Ignoring Playwright context close error", exc_info=True)
+            self._cosing_context = None
+        if self._cosing_browser is not None:
+            try:
+                self._cosing_browser.close()
+            except PlaywrightError:
+                LOGGER.debug("Ignoring Playwright browser close error", exc_info=True)
+            self._cosing_browser = None
+        if self._cosing_playwright is not None:
+            try:
+                self._cosing_playwright.stop()
+            except PlaywrightError:
+                LOGGER.debug("Ignoring Playwright shutdown error", exc_info=True)
+            self._cosing_playwright = None
         self.conn.close()
 
     # ------------------------------------------------------------------
@@ -719,7 +759,7 @@ class INCIScraper:
                 last_updated_at TEXT
             );
 
-            CREATE TABLE IF NOT EXISTS ingredient_functions (
+            CREATE TABLE IF NOT EXISTS functions (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 url TEXT UNIQUE,
@@ -977,7 +1017,7 @@ class INCIScraper:
 
         detail_tables = {
             "ingredients",
-            "ingredient_functions",
+            "functions",
         }
         if detail_tables & dropped_tables and products_available:
             LOGGER.info(
@@ -1853,37 +1893,140 @@ class INCIScraper:
         ingredient_name = ingredient_name.strip()
         if not ingredient_name:
             return CosIngRecord()
-        search_url = f"{COSING_BASE_URL}/search?keyword={parse.quote_plus(ingredient_name)}"
-        search_html = self._fetch_html(search_url)
-        if not search_html:
-            return CosIngRecord()
-        detail_html = self._ensure_cosing_detail_html(search_html, ingredient_name)
+        detail_html = self._fetch_cosing_detail_via_playwright(ingredient_name)
         if not detail_html:
             return CosIngRecord()
         return self._parse_cosing_detail_page(detail_html)
 
-    def _ensure_cosing_detail_html(self, html: str, ingredient_name: str) -> Optional[str]:
-        """Return detail page HTML, following search results when necessary."""
+    def _fetch_cosing_detail_via_playwright(self, ingredient_name: str) -> Optional[str]:
+        """Drive the CosIng interface with Playwright and return detail HTML."""
 
+        page = self._get_cosing_playwright_page()
+        if page is None:
+            return None
+        base_url = COSING_BASE_URL if COSING_BASE_URL.endswith("/") else f"{COSING_BASE_URL}/"
+        try:
+            page.goto(base_url, wait_until="domcontentloaded", timeout=15000)
+        except PlaywrightTimeoutError:
+            LOGGER.warning("Timed out while loading CosIng search page for %s", ingredient_name)
+            return None
+        except PlaywrightError:
+            LOGGER.warning("Failed to load CosIng search page for %s", ingredient_name, exc_info=True)
+            return None
+        try:
+            input_locator = page.locator("input#keyword")
+            input_locator.wait_for(state="visible", timeout=5000)
+            input_locator.fill(ingredient_name)
+        except PlaywrightError as exc:
+            LOGGER.warning("Unable to populate CosIng search input for %s: %s", ingredient_name, exc)
+            return None
+        try:
+            button_locator = page.locator("button.ecl-button--primary[type=submit]")
+            if button_locator.count() == 0:
+                button_locator = page.locator("button[type=submit]")
+            button_locator.first.click()
+        except PlaywrightError as exc:
+            LOGGER.warning("Unable to submit CosIng search for %s: %s", ingredient_name, exc)
+            return None
+        try:
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except PlaywrightTimeoutError:
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except PlaywrightTimeoutError:
+                LOGGER.debug("CosIng search results did not reach idle state", exc_info=True)
+        html = page.content()
         root = parse_html(html)
         if self._is_cosing_detail_page(root):
             return html
-        detail_url = self._select_cosing_result_url(root, ingredient_name)
-        if not detail_url:
+        anchor = self._find_cosing_result_anchor(root, ingredient_name)
+        if anchor is None:
             return None
-        return self._fetch_html(detail_url)
+        href = anchor.get("href")
+        if not href:
+            return None
+        try:
+            locator = page.locator(f"a[href='{href}']")
+            if locator.count() == 0:
+                absolute_href = self._cosing_absolute_url(href)
+                locator = page.locator(f"a[href='{absolute_href}']")
+            if locator.count() == 0:
+                return None
+            locator.first.click()
+        except PlaywrightError as exc:
+            LOGGER.warning(
+                "Failed to open CosIng search result %s for %s: %s",
+                href,
+                ingredient_name,
+                exc,
+            )
+            return None
+        try:
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except PlaywrightTimeoutError:
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except PlaywrightTimeoutError:
+                LOGGER.debug("CosIng detail page did not reach idle state", exc_info=True)
+        detail_html = page.content()
+        detail_root = parse_html(detail_html)
+        if self._is_cosing_detail_page(detail_root):
+            return detail_html
+        return None
 
-    def _is_cosing_detail_page(self, root: Node) -> bool:
-        """Determine whether ``root`` already represents a CosIng detail page."""
+    def _get_cosing_playwright_page(self) -> Optional[Any]:
+        """Return a Playwright page instance ready for CosIng navigation."""
 
-        for cell in root.find_all(tag="td"):
-            text = self._normalize_whitespace(extract_text(cell)).lower()
-            if text == "inci name":
-                return True
-        return False
+        if self._cosing_playwright_failed:
+            return None
+        if sync_playwright is None:
+            LOGGER.warning(
+                "Playwright is not installed – CosIng lookups will be skipped",
+            )
+            self._cosing_playwright_failed = True
+            return None
+        if self._cosing_page is not None:
+            return self._cosing_page
+        try:
+            playwright = sync_playwright().start()
+        except PlaywrightError:
+            LOGGER.error("Unable to start Playwright runtime for CosIng lookups", exc_info=True)
+            self._cosing_playwright_failed = True
+            return None
+        self._cosing_playwright = playwright
+        for browser_name in ("chromium", "firefox", "webkit"):
+            browser_type = getattr(playwright, browser_name, None)
+            if browser_type is None:
+                continue
+            try:
+                browser = browser_type.launch(headless=True)
+                context = browser.new_context()
+                page = context.new_page()
+            except PlaywrightError:
+                LOGGER.debug(
+                    "CosIng lookup browser %s failed to launch",
+                    browser_name,
+                    exc_info=True,
+                )
+                continue
+            self._cosing_browser = browser
+            self._cosing_context = context
+            self._cosing_page = page
+            return page
+        try:
+            playwright.stop()
+        except PlaywrightError:
+            LOGGER.debug(
+                "Ignoring Playwright shutdown error after browser launch failures",
+                exc_info=True,
+            )
+        self._cosing_playwright = None
+        self._cosing_playwright_failed = True
+        LOGGER.error("No supported Playwright browsers are available for CosIng lookups")
+        return None
 
-    def _select_cosing_result_url(self, root: Node, ingredient_name: str) -> Optional[str]:
-        """Pick the most relevant CosIng search result URL."""
+    def _find_cosing_result_anchor(self, root: Node, ingredient_name: str) -> Optional[Node]:
+        """Pick the most relevant CosIng search result anchor."""
 
         table = root.find(tag="table")
         if not table:
@@ -1894,17 +2037,16 @@ class INCIScraper:
         target_key = self._cosing_lookup_key(search_name)
         query_words = self._cosing_lookup_words(search_name)
         best_rank: Tuple[int, int] = (4, 0)
-        best_url: Optional[str] = None
+        best_anchor: Optional[Node] = None
         for index, anchor in enumerate(table.find_all(tag="a")):
             href = anchor.get("href")
             if not href:
                 continue
-            absolute = self._cosing_absolute_url(href)
             anchor_text = self._normalize_whitespace(extract_text(anchor))
             if not anchor_text:
-                if best_url is None:
+                if best_anchor is None:
                     best_rank = (3, index)
-                    best_url = absolute
+                    best_anchor = anchor
                 continue
             anchor_key = self._cosing_lookup_key(anchor_text)
             row_node = anchor
@@ -1917,7 +2059,7 @@ class INCIScraper:
             )
             row_key = self._cosing_lookup_key(row_text)
             if anchor_key == target_key or row_key == target_key:
-                return absolute
+                return anchor
             match_type = 3
             match_score = index
             if target_key and (
@@ -1941,10 +2083,19 @@ class INCIScraper:
                 if candidate_scores:
                     match_type = 2
                     match_score = min(candidate_scores)
-            if best_url is None or (match_type, match_score) < best_rank:
+            if best_anchor is None or (match_type, match_score) < best_rank:
                 best_rank = (match_type, match_score)
-                best_url = absolute
-        return best_url
+                best_anchor = anchor
+        return best_anchor
+
+    def _is_cosing_detail_page(self, root: Node) -> bool:
+        """Determine whether ``root`` already represents a CosIng detail page."""
+
+        for cell in root.find_all(tag="td"):
+            text = self._normalize_whitespace(extract_text(cell)).lower()
+            if text == "inci name":
+                return True
+        return False
 
     def _parse_cosing_detail_page(self, html: str) -> CosIngRecord:
         """Parse the CosIng detail HTML page into a :class:`CosIngRecord`."""
@@ -2375,14 +2526,14 @@ class INCIScraper:
         row = None
         if url:
             row = self.conn.execute(
-                "SELECT id, name, description FROM ingredient_functions WHERE url = ?",
+                "SELECT id, name, description FROM functions WHERE url = ?",
                 (url,),
             ).fetchone()
         if row is None:
             row = self.conn.execute(
                 """
                 SELECT id, name, description
-                FROM ingredient_functions
+                FROM functions
                 WHERE url IS NULL AND name = ?
                 """,
                 (name,),
@@ -2397,7 +2548,7 @@ class INCIScraper:
                 assignments = ", ".join(f"{col} = ?" for col in updates)
                 params = list(updates.values()) + [row["id"]]
                 self.conn.execute(
-                    f"UPDATE ingredient_functions SET {assignments} WHERE id = ?",
+                    f"UPDATE functions SET {assignments} WHERE id = ?",
                     params,
                 )
             return str(row["id"])
@@ -2406,13 +2557,13 @@ class INCIScraper:
             try:
                 self.conn.execute(
                     """
-                    INSERT INTO ingredient_functions (id, name, url, description)
+                    INSERT INTO functions (id, name, url, description)
                     VALUES (?, ?, ?, ?)
                     """,
                     (function_id, name, url, description),
                 )
             except sqlite3.IntegrityError as exc:  # pragma: no cover - rare id collision
-                if "ingredient_functions.id" in str(exc):
+                if "functions.id" in str(exc):
                     continue
                 raise
             return function_id
