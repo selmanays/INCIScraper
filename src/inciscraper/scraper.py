@@ -153,6 +153,67 @@ ADDITIONAL_COLUMN_DEFINITIONS: Dict[str, Dict[str, str]] = {
     },
 }
 
+INGREDIENT_TABLE_SQL = """
+    CREATE TABLE ingredients (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        url TEXT NOT NULL UNIQUE,
+        rating_tag TEXT,
+        also_called TEXT,
+        cosing_function_ids_json TEXT,
+        irritancy TEXT,
+        comedogenicity TEXT,
+        details_text LONGTEXT,
+        cosing_cas_numbers_json TEXT,
+        cosing_ec_numbers_json TEXT,
+        cosing_identified_ingredients_json TEXT,
+        cosing_regulation_provisions_json TEXT,
+        quick_facts_json TEXT,
+        proof_references_json TEXT,
+        last_checked_at TEXT,
+        last_updated_at TEXT
+    );
+"""
+
+INGREDIENT_COLUMN_SEQUENCE: Tuple[str, ...] = (
+    "id",
+    "name",
+    "url",
+    "rating_tag",
+    "also_called",
+    "cosing_function_ids_json",
+    "irritancy",
+    "comedogenicity",
+    "details_text",
+    "cosing_cas_numbers_json",
+    "cosing_ec_numbers_json",
+    "cosing_identified_ingredients_json",
+    "cosing_regulation_provisions_json",
+    "quick_facts_json",
+    "proof_references_json",
+    "last_checked_at",
+    "last_updated_at",
+)
+
+INGREDIENT_INSERT_COLUMNS = ", ".join(INGREDIENT_COLUMN_SEQUENCE)
+
+LEGACY_INGREDIENT_COLUMN_FALLBACKS: Dict[str, Tuple[str, ...]] = {
+    "cosing_function_ids_json": ("function_ids_json", "cosing_all_functions"),
+    "cosing_cas_numbers_json": ("cosing_cas_numbers",),
+    "cosing_ec_numbers_json": ("cosing_ec_numbers",),
+    "cosing_identified_ingredients_json": ("cosing_identified_ingredients",),
+    "cosing_regulation_provisions_json": ("cosing_regulation_provisions",),
+    "quick_facts_json": ("quick_facts",),
+    "proof_references_json": ("proof_references",),
+    "details_text": ("cosing_description",),
+}
+
+LEGACY_INGREDIENT_COLUMNS = {
+    column
+    for fallbacks in LEGACY_INGREDIENT_COLUMN_FALLBACKS.values()
+    for column in fallbacks
+}
+
 
 class _CosIngBrowser:
     """Headless Chromium helper that renders CosIng pages with JavaScript."""
@@ -1009,42 +1070,51 @@ class INCIScraper:
             "Rebuilding ingredients table to expand details_text capacity (previous type: %s)",
             column_type,
         )
+        self._rebuild_ingredients_table(
+            f"SELECT {INGREDIENT_INSERT_COLUMNS} FROM ingredients_backup"
+        )
+
+    def _rebuild_ingredients_table(self, select_query: str) -> None:
+        """Recreate the ingredients table using ``select_query`` for data copy."""
+
         self.conn.execute("ALTER TABLE ingredients RENAME TO ingredients_backup")
-        self.conn.executescript(
-            """
-            CREATE TABLE ingredients (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                url TEXT NOT NULL UNIQUE,
-                rating_tag TEXT,
-                also_called TEXT,
-                cosing_function_ids_json TEXT,
-                irritancy TEXT,
-                comedogenicity TEXT,
-                details_text LONGTEXT,
-                cosing_cas_numbers_json TEXT,
-                cosing_ec_numbers_json TEXT,
-                cosing_identified_ingredients_json TEXT,
-                cosing_regulation_provisions_json TEXT,
-                quick_facts_json TEXT,
-                proof_references_json TEXT,
-                last_checked_at TEXT,
-                last_updated_at TEXT
-            );
-            """
-        )
-        columns = (
-            "id, name, url, rating_tag, also_called, cosing_function_ids_json, irritancy, "
-            "comedogenicity, details_text, cosing_cas_numbers_json, cosing_ec_numbers_json, "
-            "cosing_identified_ingredients_json, cosing_regulation_provisions_json, "
-            "quick_facts_json, proof_references_json, "
-            "last_checked_at, last_updated_at"
-        )
+        self.conn.executescript(INGREDIENT_TABLE_SQL)
         self.conn.execute(
-            f"INSERT INTO ingredients ({columns}) SELECT {columns} FROM ingredients_backup"
+            f"INSERT INTO ingredients ({INGREDIENT_INSERT_COLUMNS}) {select_query}"
         )
         self.conn.execute("DROP TABLE ingredients_backup")
         self.conn.commit()
+
+    def _migrate_ingredient_legacy_columns(
+        self, extra_columns: Set[str], actual_columns: Set[str]
+    ) -> bool:
+        """Handle legacy CosIng columns without dropping existing ingredient data."""
+
+        if not extra_columns <= LEGACY_INGREDIENT_COLUMNS:
+            return False
+        LOGGER.info(
+            "Migrating legacy CosIng columns on ingredients table: %s",
+            sorted(extra_columns),
+        )
+        select_parts: List[str] = []
+        for column in INGREDIENT_COLUMN_SEQUENCE:
+            fallbacks = LEGACY_INGREDIENT_COLUMN_FALLBACKS.get(column, ())
+            candidates = [column]
+            for legacy_column in fallbacks:
+                if legacy_column in actual_columns:
+                    candidates.append(legacy_column)
+            if len(candidates) == 1:
+                expression = candidates[0]
+            else:
+                expression = f"COALESCE({', '.join(candidates)})"
+            if expression != column:
+                expression = f"{expression} AS {column}"
+            select_parts.append(expression)
+        select_clause = ", ".join(select_parts)
+        self._rebuild_ingredients_table(
+            f"SELECT {select_clause} FROM ingredients_backup"
+        )
+        return True
 
     def _enforce_schema(self) -> None:
         """Ensure only expected tables and columns exist in the database.
@@ -1091,6 +1161,10 @@ class INCIScraper:
                 actual_columns.update(missing_columns)
             extra_columns = actual_columns - expected_columns
             if extra_columns:
+                if table == "ingredients" and self._migrate_ingredient_legacy_columns(
+                    extra_columns, actual_columns
+                ):
+                    continue
                 LOGGER.info(
                     "Recreating table %s due to unexpected columns (expected: %s, found: %s)",
                     table,
