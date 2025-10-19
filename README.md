@@ -91,6 +91,8 @@ Varsayılan mod `--no-resume` olduğu için tüm sayfalar her çalıştırmada b
 taransa da değişmeyen kayıtlar yeniden yazılmaz; yalnızca son kontrol
 damgaları güncellenir.【F:main.py†L100-L168】【F:src/inciscraper/mixins/brands.py†L131-L169】【F:src/inciscraper/mixins/products.py†L231-L336】【F:src/inciscraper/mixins/details.py†L205-L335】
 
+Varsayılan çalışma sırasında tüm çıktı `data/` klasörü altında toplanır: veritabanı `data/incidecoder.db`, ürün görselleri `data/images/`, örnek veri görselleri `data/sample_images/` ve talep edilirse günlükler `data/logs/inciscraper.log` yoluna yazılır.【F:src/inciscraper/scraper.py†L33-L65】【F:main.py†L34-L133】
+
 ### Örnek Veri Tabanı Oluşturma
 
 Uygulamanın çalışma zincirini hızlıca doğrulamak için yalnızca üç marka ve her
@@ -98,24 +100,25 @@ markadan bir ürün içeren örnek bir veritabanı oluşturabilirsiniz. Komut,
 veritabanı dosya adınızın başına otomatik olarak `sample_` öneki ekler.
 
 ```bash
-python main.py --sample-data --db incidecoder.db
+python main.py --sample-data --db data/incidecoder.db
 ```
 
 Bu işlem ilgili markaların ürün detaylarını da kazır ve sonuçları sıkıştırılmış
-görsellerle birlikte kaydeder.【F:main.py†L96-L118】【F:src/inciscraper/scraper.py†L79-L112】
+görsellerle birlikte `data/sample_images/` dizinine kaydeder.【F:main.py†L96-L132】【F:src/inciscraper/scraper.py†L33-L114】
 
 ## Komut Satırı Parametreleri
 
 | Parametre | Açıklama |
 | --- | --- |
-| `--db PATH` | Kullanılacak SQLite dosyasının yolu (varsayılan `incidecoder.db`). |
-| `--images-dir DIR` | Görsellerin kaydedileceği dizin (varsayılan `images`). |
+| `--db PATH` | Kullanılacak SQLite dosyasının yolu (varsayılan `data/incidecoder.db`). |
+| `--images-dir DIR` | Görsellerin kaydedileceği dizin (varsayılan `data/images`). |
 | `--base-url URL` | Gerekirse farklı bir INCIDecoder tabanı kullanın. |
 | `--alternate-base-url URL` | DNS hatalarında denenecek ek taban URL'ler; birden fazla kez verilebilir. |
 | `--step {all,brands,products,details}` | Pipeline'ın belirli bir bölümünü çalıştırır. |
 | `--max-pages N` | Marka listelemede çekilecek sayfa sayısını sınırlar. |
 | `--resume/--no-resume` | `all` adımı çalışırken tamamlanmış aşamaları atlayıp atlamayacağını belirler (varsayılan `--no-resume`). |
-| `--log-level LEVEL` | Günlük çıktısının ayrıntı düzeyini ayarlar. |
+| `--log-level LEVEL` | Günlük çıktısının ayrıntı düzeyini ayarlar (varsayılan `ERROR`). |
+| `--log-output` | Konsolun yanı sıra günlükleri `data/logs/inciscraper.log` dosyasına yazar. |
 | `--sample-data` | Tüm pipeline yerine üç marka × bir ürünlük örnek veritabanı oluşturur (`sample_` öneki eklenir). |
 
 Negatif veya sıfır `--max-pages` değerleri kabul edilmez; CLI uygun hatayı
@@ -136,10 +139,11 @@ Scraper aşağıdaki tabloları oluşturur ve kontrol eder:
   alınan CAS/EC numaraları, tanımlanmış diğer maddeler ve düzenleyici
   referanslar gibi veriler, Quick Facts / Show me some proof listeleri ve detay
   bölümünün metni; tümü son kontrol/güncelleme damgalarıyla birlikte saklanır.
-  CosIng fonksiyon kimlikleri ayrıca `functions` tablosuna referanslanır.【F:src/inciscraper/mixins/database.py†L53-L70】【F:src/inciscraper/mixins/details.py†L102-L335】【F:src/inciscraper/mixins/details.py†L726-L918】
-- **functions** – CosIng fonksiyon sözlüğünü barındırır; bazı girdilerin resmi
-  CosIng sayfası bulunmadığından `url` sütunu boş bırakılabilir ve scraper
-  isim/ açıklama bilgilerini güncel tutar.【F:src/inciscraper/mixins/database.py†L26-L103】【F:src/inciscraper/mixins/details.py†L1208-L1312】
+  "Also-called" alanındaki değerler virgül ayraçlarından temizlenip JSON dizileri
+  olarak saklanır; CosIng fonksiyon kimlikleri ayrıca `functions` tablosuna referanslanır.【F:src/inciscraper/mixins/database.py†L35-L70】【F:src/inciscraper/mixins/details.py†L520-L918】
+- **functions** – CosIng fonksiyon sözlüğünü barındırır; normalize edilen
+  fonksiyon adları küçük/büyük harf duyarsız eşleştirmeyle tekilleştirilir ve
+  yalnızca isimler saklanır.【F:src/inciscraper/mixins/database.py†L26-L103】【F:src/inciscraper/mixins/details.py†L1247-L1338】
 - **frees** – #alcohol-free gibi hashtag tarzı pazarlama iddialarını ve ilgili
   tooltip açıklamalarını saklar; ürünler bu tablodaki kimliklere bağlanır.【F:src/inciscraper/mixins/database.py†L80-L84】【F:src/inciscraper/mixins/details.py†L485-L520】
 - **metadata** – Kaldığı yerden devam edebilmek için kullanılan yardımcı
@@ -192,7 +196,7 @@ npm install
 npm run dev
 ```
 
-Varsayılan olarak arayüz depo kökündeki `incidecoder.db` dosyasına bağlanır.
+Varsayılan olarak arayüz depo kökündeki `data/incidecoder.db` dosyasına bağlanır.
 Farklı bir veritabanı kullanmak için `DATABASE_PATH` ortam değişkenini
 tanımlayabilirsiniz:
 
