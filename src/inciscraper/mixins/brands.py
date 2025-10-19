@@ -117,7 +117,19 @@ class BrandScraperMixin:
 
         root = parse_html(html)
         brands: List[Tuple[str, str]] = []
-        for node in root.find_all(class_="brandlist__item"):
+        nodes = root.find_all(class_="brandlist__item")
+        if not nodes:
+            # Fallback for the updated brand list markup that uses direct anchor
+            # elements with the ``simpletextlistitem`` class.
+            for anchor in root.find_all(tag="a", class_="simpletextlistitem"):
+                href = anchor.get("href")
+                name = extract_text(anchor)
+                if not href or not name:
+                    continue
+                brands.append((name, self._absolute_url(href)))
+            return brands
+
+        for node in nodes:
             anchor = node.find(tag="a")
             if not anchor:
                 continue
