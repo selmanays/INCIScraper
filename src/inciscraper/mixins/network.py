@@ -20,6 +20,9 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency safeguard
     Image = None  # type: ignore[assignment]
     ImageFile = None  # type: ignore[assignment]
 
+
+_PILLOW_WARNING_EMITTED = False
+
 from ..constants import USER_AGENT
 
 LOGGER = logging.getLogger(__name__)
@@ -340,16 +343,24 @@ class NetworkMixin:
             return None
         suffix = self._guess_extension(image_url)
         data, suffix = self._compress_image(data, suffix)
-        slug = self._slugify(product_name) or "product"
-        filename = f"{slug}-{product_id[:8]}_cover{suffix}"
-        path = self.image_dir / filename
+        product_dir = self.image_dir / product_id
+        product_dir.mkdir(parents=True, exist_ok=True)
+        filename = f"{product_id}_cover{suffix}"
+        path = product_dir / filename
         path.write_bytes(data)
         return str(path)
 
     def _compress_image(self, data: bytes, original_suffix: str) -> Tuple[bytes, str]:
         """Compress ``data`` when Pillow is available."""
 
+        global _PILLOW_WARNING_EMITTED
         if Image is None or ImageFile is None:
+            if not _PILLOW_WARNING_EMITTED:
+                LOGGER.warning(
+                    "Pillow is not installed; storing product images without compression. "
+                    "Install Pillow to enable image optimization."
+                )
+                _PILLOW_WARNING_EMITTED = True
             return data, original_suffix
         ImageFile.LOAD_TRUNCATED_IMAGES = True
         try:

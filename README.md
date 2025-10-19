@@ -31,8 +31,12 @@ scraper sunar.
   başarısızlık devam ederse ürün akışını durdurmak yerine otomatik bir
   placeholder kaydı oluşturarak sürecin tamamlanmasını sağlar. Placeholder
   satırları sonraki çalıştırmalarda yeniden indirilmeyi dener.【F:src/inciscraper/constants.py†L10-L11】【F:src/inciscraper/mixins/details.py†L470-L519】
-- **Görsel optimizasyonu:** Ürün görselleri indirilip WebP (mümkünse lossless)
-  olarak sıkıştırılır; Pillow bulunamazsa orijinal veri saklanır.【F:src/inciscraper/mixins/network.py†L328-L407】
+- **Görsel optimizasyonu:** Ürün görselleri her bir ürün kimliği için ayrı
+  alt klasörlere kaydedilir ve `_cover` son ekiyle isimlendirilir
+  (`data/images/<product_id>/<product_id>_cover.webp` gibi). Pillow mevcutsa
+  görseller WebP (mümkünse lossless) veya optimize edilmiş JPEG olarak
+  sıkıştırılır; kütüphane yüklü değilse scraper uyarı vererek orijinal
+  veriyi saklar.【F:src/inciscraper/mixins/network.py†L16-L407】
 - **Zengin bileşen içerikleri:** Detay metni paragrafların yanı sıra madde
   işaretli listeleri de koruyacak biçimde ayrıştırılır; Quick Facts ve "Show me
   some proof" bölümleri JSON olarak saklanır. Ingredient sayfalarının yeni
@@ -103,7 +107,7 @@ Varsayılan mod `--no-resume` olduğu için tüm sayfalar her çalıştırmada b
 taransa da değişmeyen kayıtlar yeniden yazılmaz; yalnızca son kontrol
 damgaları güncellenir.【F:main.py†L100-L168】【F:src/inciscraper/mixins/brands.py†L131-L169】【F:src/inciscraper/mixins/products.py†L231-L336】【F:src/inciscraper/mixins/details.py†L205-L335】
 
-Varsayılan çalışma sırasında tüm çıktı `data/` klasörü altında toplanır: veritabanı `data/incidecoder.db`, ürün görselleri `data/images/`, örnek veri görselleri `data/sample_images/` ve talep edilirse günlükler `data/logs/inciscraper.log` yoluna yazılır.【F:src/inciscraper/scraper.py†L33-L65】【F:main.py†L34-L133】
+Varsayılan çalışma sırasında tüm çıktı `data/` klasörü altında toplanır: veritabanı `data/incidecoder.db`, ürün görselleri ürün kimlikleriyle gruplanmış biçimde `data/images/<product_id>/`, örnek veri görselleri `data/sample_images/` ve talep edilirse günlükler `data/logs/inciscraper.log` yoluna yazılır.【F:src/inciscraper/scraper.py†L33-L65】【F:src/inciscraper/mixins/network.py†L328-L358】【F:main.py†L34-L133】
 
 ### Örnek Veri Tabanı Oluşturma
 
