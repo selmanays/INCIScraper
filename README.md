@@ -67,6 +67,42 @@ scraper sunar.
   tespit edildiğinde ise ilgili kayıtlar güncellenip `last_updated_at`
   güncellenir.【F:main.py†L100-L168】【F:src/inciscraper/mixins/brands.py†L131-L169】【F:src/inciscraper/mixins/products.py†L231-L336】【F:src/inciscraper/mixins/details.py†L205-L335】
 
+## Web Arayüzü
+
+Depodaki `ui/` dizini, [bundui/shadcn-admin-dashboard-free](https://github.com/bundui/shadcn-admin-dashboard-free)
+projesinin Next.js 14 tabanlı CRM panosunu barındırır. Shadcn bileşenleri,
+Tailwind CSS ve Recharts gibi yardımcı kütüphaneler `ui/package.json` içinde
+tanımlanmıştır.【F:ui/package.json†L1-L48】 Uygulama düzeni ve navigasyon
+`MainLayout` bileşeninde toplanır; bu bileşen sol kenar çubuğu, üst bar ve tema
+anahtarını sağlar.【F:ui/components/main-layout.tsx†L1-L17】 Varsayılan pano
+`/dashboard/default` rotasında yer alır ve kartlar, çizgi grafikleri ile ödeme
+özetlerini tek sayfada sunar.【F:ui/app/dashboard/default/page.tsx†L1-L45】【F:ui/app/dashboard/default/cards/metric.tsx†L1-L128】
+Ek kullanıcı ve ayar sayfaları `ui/app/dashboard/pages/` altında bulunur, misafir
+oturum akışları ise `(guest)` klasöründe tutulur.【F:ui/app/dashboard/pages/users/page.tsx†L1-L35】【F:ui/app/(guest)/login/page.tsx†L1-L123】
+
+Arayüz tamamen statik örnek verilerle çalışır; grafikler ve tablolar için
+kullanılan diziler bileşen dosyalarında doğrudan tanımlıdır.【F:ui/app/dashboard/default/cards/metric.tsx†L8-L37】【F:ui/app/dashboard/pages/users/data.json†L1-L101】
+Global stiller `globals.scss` dosyasıyla yönetilir ve sayfa `<Inter>` fontuyla
+sunulur.【F:ui/app/globals.scss†L1-L45】【F:ui/app/layout.tsx†L1-L15】
+
+Görsel varlıklar kod içinde dinamik olarak üretilir: avatarlar isimlerden türetilen degrade arka planlar ve baş harflerle
+render edilir, giriş/kayıt sayfalarındaki görseller ise Tailwind tabanlı degrade panellerle değiştirildi. Favicon da
+`app/icon.tsx` dosyasında `ImageResponse` ile çizildiği için depoda ikili dosya barındırmadan şablonun tamamı
+sunulabilir.【F:ui/lib/utils.ts†L9-L36】【F:ui/app/icon.tsx†L1-L32】【F:ui/app/(guest)/login/page.tsx†L19-L33】【F:ui/app/dashboard/pages/users/data-table.tsx†L1-L115】
+
+### Çalıştırma
+
+```bash
+cd ui
+npm install
+npm run dev
+```
+
+Geliştirme sunucusu varsayılan olarak `http://localhost:3000` adresinde açılır.
+Bu kurulum herhangi bir veritabanı veya API bağlantısı gerektirmez; bileşenler
+Shadcn Admin Dashboard Free temasındaki statik CRM görünümünü birebir
+sergilemek için yerleşik veri kümelerini kullanır.【F:ui/app/dashboard/default/cards/metric.tsx†L8-L37】【F:ui/app/dashboard/default/cards/payment.tsx†L42-L73】
+
 ## Gereksinimler
 
 - Python 3.11 veya üzeri
@@ -208,50 +244,6 @@ INCIScraper/
 ├── src/inciscraper/       # Scraper paketinin kaynak kodu
 └── ui/                    # shadcn-ui bileşenleriyle Next.js tabanlı yönetim paneli
 ```
-
-## Web Arayüzü
-
-Scraper veritabanını görsel olarak inceleyip düzenlemek için `ui/` dizininde
-Next.js ve [shadcn/ui](https://ui.shadcn.com/) bileşenleriyle hazırlanmış bir
-kontrol paneli yer alır. Arayüz SQLite veritabanındaki tabloları listeler,
-satırları sayfalı olarak gösterir ve hücreleri doğrudan düzenleyip kaydetmeye
-imkân tanır. Güncellenen pano, shadcn dashboard örneğindeki tüm bileşenleri
-INCIScraper içeriğine uyarlayarak sunar:
-
-- Sol kenar çubuğu marka kimliğini ve tablo listesini gösterir; mobilde açılır
-  menü şeklinde kullanılabilir.
-- Üst başlıkta tablo seçici, verileri yenileme kısayolu ve ışık/koyu tema
-  düğmesi bulunur.
-- "Toplam tablo", "Seçili tablo", "Toplam kayıt" ve "Kolon & değişiklik"
-  kartları özet metrikleri vurgular.
-- Kolon dağılımı grafiği tablo şemasındaki veri türlerini görselleştirir,
-  "Tablo özeti" kartı ise birincil anahtar ve LIMIT/OFFSET gibi meta verileri
-  listeler.
-- Durum uyarıları ve düzenlenebilir tablo görünümü dark/light temalarla uyumlu
-  olacak şekilde yeniden tasarlanmıştır.
-
-### Kurulum ve Çalıştırma
-
-```bash
-cd ui
-npm install
-npm run dev
-```
-
-Varsayılan olarak arayüz depo kökündeki `data/incidecoder.db` dosyasına bağlanır.
-Farklı bir veritabanı kullanmak için `DATABASE_PATH` ortam değişkenini
-tanımlayabilirsiniz:
-
-```bash
-DATABASE_PATH=/path/to/your.db npm run dev
-```
-
-Sunucu varsayılan olarak `http://localhost:3000` adresinde çalışır. Tarayıcıda
-tablo seçici üzerinden veri tabanındaki tablolar arasında geçiş yapabilir,
-hücreleri düzenledikten sonra **Kaydet** düğmesiyle toplu olarak
-güncelleyebilirsiniz. Birincil anahtar sütunları koruma amacıyla yalnızca
-okunur olarak gelir; diğer alanlar düzenlenebilir. Sorgular satır sayfa boyutu
-ve sayfa numarasına göre sınırlanır.
 
 ## Geliştirme İpuçları
 
