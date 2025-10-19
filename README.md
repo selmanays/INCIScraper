@@ -14,6 +14,9 @@ scraper sunar.
 - **Kaldığı yerden devam etme:** Çalışma durumu `metadata` tablosunda saklandığı
   için kesilen oturumlar marka, ürün ve ürün detayı adımlarında otomatik olarak
   kaldığı yerden devam eder.【F:src/inciscraper/mixins/database.py†L98-L165】【F:src/inciscraper/scraper.py†L114-L138】
+- **Kesintiye dayanıklı marka kayıtları:** Marka listeleme sırasında yapılan
+  ekleme ve güncellemeler hemen commit edildiği için uzun süren taramalarda
+  beklenmedik kesintiler veri kaybına yol açmaz.【F:src/inciscraper/mixins/brands.py†L147-L187】
 - **Dayanıklı veritabanı şeması:** Scraper açılışta gerekli tabloları oluşturur,
   eksik sütunları ekler ve beklenmeyen yapıları temizleyerek veri tutarlılığı
   sağlar.【F:src/inciscraper/mixins/database.py†L19-L233】

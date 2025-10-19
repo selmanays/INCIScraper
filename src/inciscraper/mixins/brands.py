@@ -167,6 +167,7 @@ class BrandScraperMixin:
                     if "brands.id" in str(exc):
                         continue
                     raise
+                self.conn.commit()
                 return True
         updates: Dict[str, str] = {"last_checked_at": now}
         changed = False
@@ -182,5 +183,6 @@ class BrandScraperMixin:
                 f"UPDATE brands SET {assignments} WHERE id = ?",
                 params,
             )
+            self.conn.commit()
         return False
 
