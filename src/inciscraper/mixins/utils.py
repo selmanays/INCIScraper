@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from urllib.parse import urlsplit
 
 
 class UtilityMixin:
@@ -19,8 +20,13 @@ class UtilityMixin:
     def _absolute_url(self, href: str) -> str:
         """Resolve ``href`` relative to the configured base URL."""
 
-        if href.startswith("http://") or href.startswith("https://"):
+        if not href:
             return href
+        if href.startswith(("http://", "https://")):
+            return href
+        if href.startswith("//"):
+            scheme = urlsplit(self.base_url).scheme or "https"
+            return f"{scheme}:{href}"
         return f"{self.base_url}{href}" if href.startswith("/") else href
 
     def _append_offset(self, base_url: str, offset: int) -> str:
