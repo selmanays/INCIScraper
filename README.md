@@ -10,24 +10,24 @@ scraper sunar.
 
 - **Üç aşamalı pipeline:** Markaları listeleyip kaydeder, her marka için ürün
   sayfalarını dolaşır ve ürün detaylarını (tanım, bileşen listeleri, görseller,
-  #free iddiaları ve kilit bileşen vurguları vb.) veri tabanına işler.【F:src/inciscraper/scraper.py†L1298-L1345】【F:src/inciscraper/scraper.py†L1504-L1579】
+  #free iddiaları ve kilit bileşen vurguları vb.) veri tabanına işler.【F:src/inciscraper/mixins/brands.py†L21-L169】【F:src/inciscraper/mixins/products.py†L21-L221】【F:src/inciscraper/mixins/details.py†L51-L137】
 - **Kaldığı yerden devam etme:** Çalışma durumu `metadata` tablosunda saklandığı
   için kesilen oturumlar marka, ürün ve ürün detayı adımlarında otomatik olarak
-  kaldığı yerden devam eder.【F:src/inciscraper/scraper.py†L322-L401】【F:src/inciscraper/scraper.py†L351-L603】
+  kaldığı yerden devam eder.【F:src/inciscraper/mixins/database.py†L98-L165】【F:src/inciscraper/scraper.py†L114-L138】
 - **Dayanıklı veritabanı şeması:** Scraper açılışta gerekli tabloları oluşturur,
   eksik sütunları ekler ve beklenmeyen yapıları temizleyerek veri tutarlılığı
-  sağlar.【F:src/inciscraper/scraper.py†L627-L905】
+  sağlar.【F:src/inciscraper/mixins/database.py†L19-L233】
 - **Otomatik durum sıfırlama:** Ürün tablosu temizlendiğinde marka
-  ``products_scraped`` bayrakları ve ``sqlite_sequence`` sayaçları otomatik
-  olarak sıfırlanır; böylece yeniden tarama hatasız başlar.【F:src/inciscraper/scraper.py†L351-L480】【F:src/inciscraper/scraper.py†L734-L812】
+  ``products_scraped`` bayrakları ve ilgili metaveri otomatik olarak
+  sıfırlanır; böylece yeniden tarama hatasız başlar.【F:src/inciscraper/mixins/database.py†L143-L166】
 - **Bağımlılık dostu HTML ayrıştırıcı:** `html.parser` üzerine kurulu özel DOM
   katmanı BeautifulSoup benzeri bir API sunarak ek bağımlılıklara gerek
   bırakmaz.【F:src/inciscraper/parser.py†L1-L159】【F:src/inciscraper/parser.py†L321-L414】
 - **Ağ hatası toleransı:** DNS sorunlarında alternatif alan adlarına geçer,
   DNS-over-HTTPS ile IP çözer ve gerekirse doğrudan IP üzerinden TLS bağlantısı
-  kurar.【F:src/inciscraper/scraper.py†L2066-L2396】
+  kurar.【F:src/inciscraper/mixins/network.py†L49-L273】
 - **Görsel optimizasyonu:** Ürün görselleri indirilip WebP (mümkünse lossless)
-  olarak sıkıştırılır; Pillow bulunamazsa orijinal veri saklanır.【F:src/inciscraper/scraper.py†L2408-L2475】
+  olarak sıkıştırılır; Pillow bulunamazsa orijinal veri saklanır.【F:src/inciscraper/mixins/network.py†L328-L407】
 - **Zengin bileşen içerikleri:** Detay metni paragrafların yanı sıra madde
   işaretli listeleri de koruyacak biçimde ayrıştırılır; Quick Facts ve "Show me
   some proof" bölümleri JSON olarak saklanır. CosIng verileri artık Playwright
@@ -38,15 +38,15 @@ scraper sunar.
   ile alternatif isimler içeren bileşenler CosIng'de otomatik olarak her varyant
   için sırayla sorgulanır; birleşik kayıt bulunamazsa ilgili varyantın kendisi
   tam eşleşme verdiğinde doğrudan o sonuç açılır. Böylece arayüz tek terimle
-  sonuç vermediğinde bile veri kaçmaz.【F:src/inciscraper/scraper.py†L1888-L2060】【F:src/inciscraper/scraper.py†L2061-L2244】
+  sonuç vermediğinde bile veri kaçmaz.【F:src/inciscraper/mixins/details.py†L102-L448】【F:src/inciscraper/mixins/details.py†L726-L918】
 - **Vurguları bileşen kayıtlarına bağlama:** "Key Ingredients" ve "Other
   Ingredients" bölümlerinde listelenen öğeler ürünün ana bileşen listesiyle
-  eşleştirilir ve sonuçlar JSON formatındaki kimlik listeleri olarak saklanır.【F:src/inciscraper/scraper.py†L1587-L1651】
+  eşleştirilir ve sonuçlar JSON formatındaki kimlik listeleri olarak saklanır.【F:src/inciscraper/mixins/details.py†L157-L335】
 - **Akıllı yeniden tarama:** Varsayılan çalıştırma tüm marka, ürün ve detay
   sayfalarını baştan kontrol eder; içerikte değişiklik yoksa satırlar
   yeniden yazılmaz, yalnızca `last_checked_at` damgaları güncellenir. Değişiklik
   tespit edildiğinde ise ilgili kayıtlar güncellenip `last_updated_at`
-  güncellenir.【F:main.py†L100-L168】【F:src/inciscraper/scraper.py†L1065-L1293】【F:src/inciscraper/scraper.py†L1520-L1655】【F:src/inciscraper/scraper.py†L1918-L2013】
+  güncellenir.【F:main.py†L100-L168】【F:src/inciscraper/mixins/brands.py†L131-L169】【F:src/inciscraper/mixins/products.py†L231-L336】【F:src/inciscraper/mixins/details.py†L205-L335】
 
 ## Gereksinimler
 
@@ -86,7 +86,7 @@ Scraper başlarken veritabanındaki durumu özetler, ardından eksik adımları
 çalıştırır ve sonunda bağlantıyı kapatır.【F:main.py†L63-L118】
 Varsayılan mod `--no-resume` olduğu için tüm sayfalar her çalıştırmada baştan
 taransa da değişmeyen kayıtlar yeniden yazılmaz; yalnızca son kontrol
-damgaları güncellenir.【F:main.py†L100-L168】【F:src/inciscraper/scraper.py†L1520-L1655】
+damgaları güncellenir.【F:main.py†L100-L168】【F:src/inciscraper/mixins/brands.py†L131-L169】【F:src/inciscraper/mixins/products.py†L231-L336】【F:src/inciscraper/mixins/details.py†L205-L335】
 
 ### Örnek Veri Tabanı Oluşturma
 
@@ -99,7 +99,7 @@ python main.py --sample-data --db incidecoder.db
 ```
 
 Bu işlem ilgili markaların ürün detaylarını da kazır ve sonuçları sıkıştırılmış
-görsellerle birlikte kaydeder.【F:main.py†L96-L118】【F:src/inciscraper/scraper.py†L253-L298】
+görsellerle birlikte kaydeder.【F:main.py†L96-L118】【F:src/inciscraper/scraper.py†L79-L112】
 
 ## Komut Satırı Parametreleri
 
@@ -123,39 +123,39 @@ verir.【F:main.py†L55-L69】
 Scraper aşağıdaki tabloları oluşturur ve kontrol eder:
 
 - **brands** – Marka adı, özgün URL, ürünlerinin işlenip işlenmediğini gösteren
-  bayrak ile `last_checked_at`/`last_updated_at` damgaları.
+  bayrak ile `last_checked_at`/`last_updated_at` damgaları.【F:src/inciscraper/mixins/database.py†L26-L33】
 - **products** – Marka ilişkisi, ürün adı, açıklama, görsel yolu, bileşen
   kimlikleri (`ingredient_ids_json`), öne çıkarılan bileşen kimlikleri
   (`key_ingredient_ids_json`, `other_ingredient_ids_json`), #free etiketlerinin
   kimlikleri (`free_tag_ids_json`) ve detay verilerinin en son ne zaman kontrol
-  edildiğine dair damgalar.【F:src/inciscraper/scraper.py†L640-L706】【F:src/inciscraper/scraper.py†L1554-L1637】
+  edildiğine dair damgalar.【F:src/inciscraper/mixins/database.py†L35-L51】【F:src/inciscraper/mixins/details.py†L205-L335】
 - **ingredients** – Bileşenin derecelendirmesi, "başka adları", CosIng'den
   alınan CAS/EC numaraları, tanımlanmış diğer maddeler ve düzenleyici
   referanslar gibi veriler, Quick Facts / Show me some proof listeleri ve detay
   bölümünün metni; tümü son kontrol/güncelleme damgalarıyla birlikte saklanır.
-  CosIng fonksiyon kimlikleri ayrıca `functions` tablosuna referanslanır.【F:src/inciscraper/scraper.py†L662-L718】【F:src/inciscraper/scraper.py†L1888-L2244】
+  CosIng fonksiyon kimlikleri ayrıca `functions` tablosuna referanslanır.【F:src/inciscraper/mixins/database.py†L53-L70】【F:src/inciscraper/mixins/details.py†L102-L335】【F:src/inciscraper/mixins/details.py†L726-L918】
 - **frees** – #alcohol-free gibi hashtag tarzı pazarlama iddialarını ve ilgili
-  tooltip açıklamalarını saklar; ürünler bu tablodaki kimliklere bağlanır.【F:src/inciscraper/scraper.py†L668-L705】【F:src/inciscraper/scraper.py†L1668-L1708】
+  tooltip açıklamalarını saklar; ürünler bu tablodaki kimliklere bağlanır.【F:src/inciscraper/mixins/database.py†L80-L84】【F:src/inciscraper/mixins/details.py†L485-L520】
 - **metadata** – Kaldığı yerden devam edebilmek için kullanılan yardımcı
-  anahtar/değer deposu.
+  anahtar/değer deposu.【F:src/inciscraper/mixins/database.py†L86-L132】
 
 Schema ve kolonlar uygulama tarafından doğrulanır; beklenmeyen tablo veya
-sütunlar tespit edilirse kaldırılır.【F:src/inciscraper/scraper.py†L627-L905】
+sütunlar tespit edilirse kaldırılır.【F:src/inciscraper/mixins/database.py†L223-L280】
 
 ## Nasıl Çalışır?
 
 1. **Markalar:** `/brands` sayfalarındaki bağlantıları tarar, marka adlarını ve
    URL'lerini kaydeder. Sayfa sayısı bilinmiyorsa metadata kayıtları ile takip
-   edilir.【F:src/inciscraper/scraper.py†L351-L480】【F:src/inciscraper/scraper.py†L322-L401】
+   edilir.【F:src/inciscraper/mixins/brands.py†L21-L169】【F:src/inciscraper/mixins/database.py†L98-L166】
 2. **Ürünler:** Her marka için paginasyonlu ürün listelerini dolaşır, hata
    durumlarında alternatif URL denemeleri yapar ve yeni ürünleri ekler veya
-   isimleri günceller.【F:src/inciscraper/scraper.py†L481-L603】
+   isimleri günceller.【F:src/inciscraper/mixins/products.py†L21-L221】
 3. **Ürün Detayları:** Ürün sayfalarını indirir, bileşen listelerini, fonksiyon
    tablolarını, hashtag öne çıkanlarını ve varsa "discontinued" uyarılarını
-   ayrıştırır; ardından görselleri indirip optimize eder.【F:src/inciscraper/scraper.py†L1298-L1655】【F:src/inciscraper/scraper.py†L2408-L2475】
+   ayrıştırır; ardından görselleri indirip optimize eder.【F:src/inciscraper/mixins/details.py†L51-L206】【F:src/inciscraper/mixins/network.py†L328-L380】
 4. **Bileşen Detayları:** Ürünlerde görülen her bileşenin kendi sayfasını
    ziyaret eder, derecelendirme bilgilerini ve COSING bölümünü çıkarır, ilgili
-   bağlantıları normalize eder.【F:src/inciscraper/scraper.py†L1918-L2013】
+   bağlantıları normalize eder.【F:src/inciscraper/mixins/details.py†L466-L918】
 
 Bu adımların tümü idempotent olduğundan scraper'ı tekrar çalıştırmak veri
 tekrarı oluşturmaz.
