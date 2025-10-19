@@ -68,6 +68,12 @@ EXPECTED_SCHEMA: Dict[str, Set[str]] = {
         "tooltip",
     },
     "metadata": {"key", "value"},
+    "cosing_cache": {
+        "lookup_key",
+        "detail_html",
+        "source_term",
+        "last_updated_at",
+    },
 }
 
 
@@ -93,6 +99,9 @@ ADDITIONAL_COLUMN_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "cosing_function_ids_json": "cosing_function_ids_json TEXT",
         "quick_facts_json": "quick_facts_json TEXT",
         "proof_references_json": "proof_references_json TEXT",
+    },
+    "cosing_cache": {
+        "last_updated_at": "last_updated_at TEXT",
     },
 }
 
