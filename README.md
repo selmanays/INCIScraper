@@ -137,6 +137,9 @@ Scraper aşağıdaki tabloları oluşturur ve kontrol eder:
   referanslar gibi veriler, Quick Facts / Show me some proof listeleri ve detay
   bölümünün metni; tümü son kontrol/güncelleme damgalarıyla birlikte saklanır.
   CosIng fonksiyon kimlikleri ayrıca `functions` tablosuna referanslanır.【F:src/inciscraper/mixins/database.py†L53-L70】【F:src/inciscraper/mixins/details.py†L102-L335】【F:src/inciscraper/mixins/details.py†L726-L918】
+- **functions** – CosIng fonksiyon sözlüğünü barındırır; bazı girdilerin resmi
+  CosIng sayfası bulunmadığından `url` sütunu boş bırakılabilir ve scraper
+  isim/ açıklama bilgilerini güncel tutar.【F:src/inciscraper/mixins/database.py†L26-L103】【F:src/inciscraper/mixins/details.py†L1208-L1312】
 - **frees** – #alcohol-free gibi hashtag tarzı pazarlama iddialarını ve ilgili
   tooltip açıklamalarını saklar; ürünler bu tablodaki kimliklere bağlanır.【F:src/inciscraper/mixins/database.py†L80-L84】【F:src/inciscraper/mixins/details.py†L485-L520】
 - **metadata** – Kaldığı yerden devam edebilmek için kullanılan yardımcı

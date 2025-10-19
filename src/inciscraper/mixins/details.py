@@ -1270,7 +1270,9 @@ class DetailScraperMixin:
         """Ensure an ingredient function entry exists and return its id."""
 
         name = info.name.strip()
-        url = info.url
+        url = info.url.strip() if info.url else None
+        if not url:
+            url = None
         description = info.description.strip()
         if not name and not url:
             return None
