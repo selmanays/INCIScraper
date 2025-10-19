@@ -10,6 +10,8 @@ COSING_BASE_URL = "https://ec.europa.eu/growth/tools-databases/cosing"
 USER_AGENT = "INCIScraper/1.0 (+https://incidecoder.com)"
 DEFAULT_TIMEOUT = 30
 REQUEST_SLEEP = 0.5  # polite delay between HTTP requests
+INGREDIENT_FETCH_ATTEMPTS = 6
+INGREDIENT_PLACEHOLDER_MARKER = "__INCISCRAPER_PLACEHOLDER__"
 PROGRESS_LOG_INTERVAL = 10
 
 

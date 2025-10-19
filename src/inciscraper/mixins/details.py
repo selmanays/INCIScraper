@@ -22,7 +22,12 @@ except ModuleNotFoundError:  # pragma: no cover - fallback when Playwright missi
     PlaywrightTimeoutError = TimeoutError  # type: ignore[assignment]
     sync_playwright = None  # type: ignore[assignment]
 
-from ..constants import COSING_BASE_URL, PROGRESS_LOG_INTERVAL
+from ..constants import (
+    COSING_BASE_URL,
+    INGREDIENT_FETCH_ATTEMPTS,
+    INGREDIENT_PLACEHOLDER_MARKER,
+    PROGRESS_LOG_INTERVAL,
+)
 from ..models import (
     CosIngRecord,
     FreeTag,
@@ -478,12 +483,23 @@ class DetailScraperMixin:
             if row:
                 return str(row["id"])
         row = self.conn.execute(
-            "SELECT id FROM ingredients WHERE url = ?",
+            "SELECT id, details_text FROM ingredients WHERE url = ?",
             (ingredient.url,),
         ).fetchone()
-        if row:
+        if row and not self._is_placeholder_details(row["details_text"] or ""):
             return str(row["id"])
-        details = self._scrape_ingredient_page(ingredient.url)
+        if row:
+            LOGGER.info(
+                "Previously stored placeholder for %s – retrying download", ingredient.url
+            )
+        try:
+            details = self._scrape_ingredient_page(ingredient.url)
+        except RuntimeError as exc:
+            LOGGER.error("Unable to download ingredient %s: %s", ingredient.url, exc)
+            if row:
+                return str(row["id"])
+            placeholder = self._build_placeholder_ingredient_details(ingredient, str(exc))
+            return self._store_ingredient_details(placeholder)
         return self._store_ingredient_details(details)
 
     def _ensure_free_tag(self, free_tag: FreeTag) -> str:
@@ -530,10 +546,57 @@ class DetailScraperMixin:
         """Download and parse a single ingredient page."""
 
         LOGGER.info("Fetching ingredient details %s", url)
-        html = self._fetch_html(url)
+        html = self._fetch_html(url, attempts=INGREDIENT_FETCH_ATTEMPTS)
         if html is None:
-            raise RuntimeError(f"Unable to download ingredient page {url}")
+            raise RuntimeError(
+                f"Unable to download ingredient page {url} after {INGREDIENT_FETCH_ATTEMPTS} attempts"
+            )
         return self._parse_ingredient_page(html, url)
+
+    @staticmethod
+    def _is_placeholder_details(details_text: str) -> bool:
+        """Return ``True`` when ``details_text`` represents a placeholder entry."""
+
+        return INGREDIENT_PLACEHOLDER_MARKER in details_text
+
+    def _build_placeholder_ingredient_details(
+        self, ingredient: IngredientReference, reason: str
+    ) -> IngredientDetails:
+        """Create an :class:`IngredientDetails` placeholder when downloads fail."""
+
+        tooltip_summary = (
+            self._normalize_whitespace(ingredient.tooltip_text)
+            if ingredient.tooltip_text
+            else None
+        )
+        reason_summary = (
+            self._normalize_whitespace(str(reason)) if reason else "Unknown error"
+        )
+        reason_summary = reason_summary[:300]
+        message_parts = [
+            "This ingredient record is a temporary placeholder because the source page could not be downloaded.",
+            f"Reason: {reason_summary}",
+            f"Marker: {INGREDIENT_PLACEHOLDER_MARKER}",
+        ]
+        if tooltip_summary:
+            message_parts.append(f"Tooltip excerpt: {tooltip_summary}")
+        details_text = "\n\n".join(message_parts)
+        return IngredientDetails(
+            name=ingredient.name,
+            url=ingredient.url,
+            rating_tag="",
+            also_called=[],
+            irritancy="",
+            comedogenicity="",
+            details_text=details_text,
+            cosing_cas_numbers=[],
+            cosing_ec_numbers=[],
+            cosing_identified_ingredients=[],
+            cosing_regulation_provisions=[],
+            cosing_function_infos=[],
+            quick_facts=[],
+            proof_references=[],
+        )
 
     def _parse_ingredient_page(self, html: str, url: str) -> IngredientDetails:
         """Convert ingredient HTML into a structured :class:`IngredientDetails`."""
