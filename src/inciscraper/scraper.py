@@ -2131,6 +2131,8 @@ class INCIScraper:
         )
         best_rank: Tuple[int, int] = (4, 0)
         best_anchor: Optional[Node] = None
+        exact_target_rank: Tuple[int, int] = (4, 0)
+        exact_target_anchor: Optional[Node] = None
         for index, anchor in enumerate(table.find_all(tag="a")):
             href = anchor.get("href")
             if not href:
@@ -2153,11 +2155,14 @@ class INCIScraper:
             row_key = self._cosing_lookup_key(row_text)
             anchor_words = self._cosing_lookup_words(anchor_text)
             row_words = self._cosing_lookup_words(row_text)
+            target_exact_match = False
             if expected_key:
                 if anchor_key == expected_key or row_key == expected_key:
                     return anchor
-            elif anchor_key == target_key or row_key == target_key:
-                return anchor
+            if anchor_key == target_key or row_key == target_key:
+                if not expected_key:
+                    return anchor
+                target_exact_match = True
             if expected_words and (
                 expected_words.issubset(anchor_words)
                 or expected_words.issubset(row_words)
@@ -2184,11 +2189,19 @@ class INCIScraper:
                 if candidate_scores:
                     match_type = 2
                     match_score = min(candidate_scores)
+            if target_exact_match:
+                target_rank = (0, match_score)
+                if (
+                    exact_target_anchor is None
+                    or target_rank < exact_target_rank
+                ):
+                    exact_target_rank = target_rank
+                    exact_target_anchor = anchor
             if best_anchor is None or (match_type, match_score) < best_rank:
                 best_rank = (match_type, match_score)
                 best_anchor = anchor
-        if expected_key:
-            return None
+        if expected_key and exact_target_anchor is not None:
+            return exact_target_anchor
         return best_anchor
 
     def _is_cosing_detail_page(self, root: Node) -> bool:
