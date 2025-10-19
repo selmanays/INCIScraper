@@ -30,15 +30,18 @@ scraper sunar.
   olarak sıkıştırılır; Pillow bulunamazsa orijinal veri saklanır.【F:src/inciscraper/mixins/network.py†L328-L407】
 - **Zengin bileşen içerikleri:** Detay metni paragrafların yanı sıra madde
   işaretli listeleri de koruyacak biçimde ayrıştırılır; Quick Facts ve "Show me
-  some proof" bölümleri JSON olarak saklanır. CosIng verileri artık Playwright
-  ile resmi arama formu doldurularak alınır; CAS/EC numaraları, tanımlanan
-  diğer maddeler ve düzenleyici referanslar temizlenip JSON dizileri şeklinde
-  depolanır, fonksiyon adları ise baş harfleri büyük olacak biçimde `functions`
-  tablosuna yazılıp ingredient kayıtlarına ID listeleriyle bağlanır. Slash (`/`)
-  ile alternatif isimler içeren bileşenler CosIng'de otomatik olarak her varyant
-  için sırayla sorgulanır; birleşik kayıt bulunamazsa ilgili varyantın kendisi
-  tam eşleşme verdiğinde doğrudan o sonuç açılır. Böylece arayüz tek terimle
-  sonuç vermediğinde bile veri kaçmaz.【F:src/inciscraper/mixins/details.py†L102-L448】【F:src/inciscraper/mixins/details.py†L726-L918】
+  some proof" bölümleri JSON olarak saklanır. Ingredient sayfalarının yeni
+  `itemprop` tabanlı yerleşimleri de desteklenerek "Also-called", irritasyon/
+  komedojenik değerleri ve anlatım metinleri eksiksiz toplanır. CosIng verileri
+  artık Playwright ile resmi arama formu doldurularak alınır; CAS/EC
+  numaraları, tanımlanan diğer maddeler ve düzenleyici referanslar temizlenip
+  JSON dizileri şeklinde depolanır, fonksiyon adları ise baş harfleri büyük
+  olacak biçimde `functions` tablosuna yazılıp ingredient kayıtlarına ID
+  listeleriyle bağlanır. Slash (`/`) ile alternatif isimler içeren bileşenler
+  CosIng'de otomatik olarak her varyant için sırayla sorgulanır; birleşik kayıt
+  bulunamazsa ilgili varyantın kendisi tam eşleşme verdiğinde doğrudan o sonuç
+  açılır. Böylece arayüz tek terimle sonuç vermediğinde bile veri
+  kaçmaz.【F:src/inciscraper/mixins/details.py†L102-L448】【F:src/inciscraper/mixins/details.py†L726-L918】
 - **Vurguları bileşen kayıtlarına bağlama:** "Key Ingredients" ve "Other
   Ingredients" bölümlerinde listelenen öğeler ürünün ana bileşen listesiyle
   eşleştirilir ve sonuçlar JSON formatındaki kimlik listeleri olarak saklanır.【F:src/inciscraper/mixins/details.py†L157-L335】
