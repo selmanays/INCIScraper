@@ -183,6 +183,7 @@ class IngredientFunction:
 class CosIngRecord:
     """Structured data retrieved from the CosIng public database."""
 
+    name: str = ""
     cas_numbers: List[str] = field(default_factory=list)
     ec_numbers: List[str] = field(default_factory=list)
     identified_ingredients: List[str] = field(default_factory=list)
@@ -1898,32 +1899,77 @@ class INCIScraper:
         ingredient_name = ingredient_name.strip()
         if not ingredient_name:
             return CosIngRecord()
-        detail_html = self._fetch_cosing_detail_via_playwright(ingredient_name)
-        if not detail_html:
-            return CosIngRecord()
-        return self._parse_cosing_detail_page(detail_html)
+        target_key = self._cosing_lookup_key(ingredient_name)
+        for search_term in self._cosing_search_terms(ingredient_name):
+            detail_html = self._fetch_cosing_detail_via_playwright(
+                search_term,
+                target_name=ingredient_name,
+            )
+            if not detail_html:
+                continue
+            record = self._parse_cosing_detail_page(detail_html)
+            if not record.name:
+                search_key = self._cosing_lookup_key(search_term)
+                if search_key == target_key:
+                    return record
+                continue
+            if self._cosing_lookup_key(record.name) == target_key:
+                return record
+        return CosIngRecord()
 
-    def _fetch_cosing_detail_via_playwright(self, ingredient_name: str) -> Optional[str]:
+    def _cosing_search_terms(self, ingredient_name: str) -> List[str]:
+        """Return CosIng search fallbacks for names with slash-separated variants."""
+
+        cleaned = ingredient_name.replace("\u200b", "").strip()
+        if not cleaned:
+            return []
+        terms: List[str] = []
+        if "/" in cleaned:
+            for part in cleaned.split("/"):
+                normalised = self._normalize_whitespace(part)
+                if normalised and normalised not in terms:
+                    terms.append(normalised)
+        full_name = self._normalize_whitespace(cleaned)
+        if full_name and full_name not in terms:
+            terms.append(full_name)
+        return terms
+
+    def _fetch_cosing_detail_via_playwright(
+        self,
+        search_term: str,
+        *,
+        target_name: Optional[str] = None,
+    ) -> Optional[str]:
         """Drive the CosIng interface with Playwright and return detail HTML."""
 
         page = self._get_cosing_playwright_page()
         if page is None:
             return None
+        query = search_term.strip()
+        if not query:
+            return None
+        display_name = target_name or query
         base_url = COSING_BASE_URL if COSING_BASE_URL.endswith("/") else f"{COSING_BASE_URL}/"
         try:
             page.goto(base_url, wait_until="domcontentloaded", timeout=15000)
         except PlaywrightTimeoutError:
-            LOGGER.warning("Timed out while loading CosIng search page for %s", ingredient_name)
+            LOGGER.warning(
+                "Timed out while loading CosIng search page for %s", display_name
+            )
             return None
         except PlaywrightError:
-            LOGGER.warning("Failed to load CosIng search page for %s", ingredient_name, exc_info=True)
+            LOGGER.warning(
+                "Failed to load CosIng search page for %s", display_name, exc_info=True
+            )
             return None
         try:
             input_locator = page.locator("input#keyword")
             input_locator.wait_for(state="visible", timeout=5000)
-            input_locator.fill(ingredient_name)
+            input_locator.fill(query)
         except PlaywrightError as exc:
-            LOGGER.warning("Unable to populate CosIng search input for %s: %s", ingredient_name, exc)
+            LOGGER.warning(
+                "Unable to populate CosIng search input for %s: %s", display_name, exc
+            )
             return None
         try:
             button_locator = page.locator("button.ecl-button--primary[type=submit]")
@@ -1931,7 +1977,9 @@ class INCIScraper:
                 button_locator = page.locator("button[type=submit]")
             button_locator.first.click()
         except PlaywrightError as exc:
-            LOGGER.warning("Unable to submit CosIng search for %s: %s", ingredient_name, exc)
+            LOGGER.warning(
+                "Unable to submit CosIng search for %s: %s", display_name, exc
+            )
             return None
         try:
             page.wait_for_load_state("networkidle", timeout=15000)
@@ -1940,11 +1988,16 @@ class INCIScraper:
                 page.wait_for_load_state("domcontentloaded", timeout=5000)
             except PlaywrightTimeoutError:
                 LOGGER.debug("CosIng search results did not reach idle state", exc_info=True)
+        self._wait_for_cosing_dynamic_content(page)
         html = page.content()
         root = parse_html(html)
         if self._is_cosing_detail_page(root):
             return html
-        anchor = self._find_cosing_result_anchor(root, ingredient_name)
+        anchor = self._find_cosing_result_anchor(
+            root,
+            query,
+            target_name=target_name,
+        )
         if anchor is None:
             return None
         href = anchor.get("href")
@@ -1962,7 +2015,7 @@ class INCIScraper:
             LOGGER.warning(
                 "Failed to open CosIng search result %s for %s: %s",
                 href,
-                ingredient_name,
+                display_name,
                 exc,
             )
             return None
@@ -1973,11 +2026,35 @@ class INCIScraper:
                 page.wait_for_load_state("domcontentloaded", timeout=5000)
             except PlaywrightTimeoutError:
                 LOGGER.debug("CosIng detail page did not reach idle state", exc_info=True)
+        self._wait_for_cosing_dynamic_content(page)
         detail_html = page.content()
         detail_root = parse_html(detail_html)
         if self._is_cosing_detail_page(detail_root):
             return detail_html
         return None
+
+    def _wait_for_cosing_dynamic_content(self, page: Any, *, timeout: int = 15000) -> bool:
+        """Wait until CosIng renders either the search results or detail table."""
+
+        if page is None:
+            return False
+
+        selector = (
+            "app-detail-subs table.ecl-table, "
+            "app-results-subs table.ecl-table, "
+            "table.ecl-table"
+        )
+        try:
+            page.wait_for_selector(selector, state="attached", timeout=timeout)
+            return True
+        except PlaywrightTimeoutError:
+            return False
+        except PlaywrightError:
+            LOGGER.debug(
+                "Encountered an error while waiting for CosIng dynamic content",
+                exc_info=True,
+            )
+            return False
 
     def _get_cosing_playwright_page(self) -> Optional[Any]:
         """Return a Playwright page instance ready for CosIng navigation."""
@@ -2030,17 +2107,28 @@ class INCIScraper:
         LOGGER.error("No supported Playwright browsers are available for CosIng lookups")
         return None
 
-    def _find_cosing_result_anchor(self, root: Node, ingredient_name: str) -> Optional[Node]:
+    def _find_cosing_result_anchor(
+        self,
+        root: Node,
+        ingredient_name: str,
+        *,
+        target_name: Optional[str] = None,
+    ) -> Optional[Node]:
         """Pick the most relevant CosIng search result anchor."""
 
         table = root.find(tag="table")
         if not table:
             return None
-        search_name = ingredient_name.strip()
+        search_name = ingredient_name.replace("\u200b", "").strip()
         if not search_name:
             return None
-        target_key = self._cosing_lookup_key(search_name)
-        query_words = self._cosing_lookup_words(search_name)
+        target_name = target_name.replace("\u200b", "").strip() if target_name else ""
+        search_key = self._cosing_lookup_key(search_name)
+        search_words = self._cosing_lookup_words(search_name)
+        target_key = self._cosing_lookup_key(target_name) if target_name else ""
+        target_words = self._cosing_lookup_words(target_name) if target_name else set()
+        best_target_rank: Optional[Tuple[int, int]] = None
+        best_target_anchor: Optional[Node] = None
         best_rank: Tuple[int, int] = (4, 0)
         best_anchor: Optional[Node] = None
         for index, anchor in enumerate(table.find_all(tag="a")):
@@ -2063,34 +2151,51 @@ class INCIScraper:
                 else anchor_text
             )
             row_key = self._cosing_lookup_key(row_text)
-            if anchor_key == target_key or row_key == target_key:
+            anchor_words = self._cosing_lookup_words(anchor_text)
+            row_words = self._cosing_lookup_words(row_text)
+            if target_key and (anchor_key == target_key or row_key == target_key):
                 return anchor
+            if target_key:
+                candidate_scores: List[int] = []
+                if target_words and target_words.issubset(anchor_words):
+                    candidate_scores.append(len(anchor_words) - len(target_words))
+                if target_words and target_words.issubset(row_words):
+                    candidate_scores.append(len(row_words) - len(target_words))
+                if candidate_scores:
+                    rank = (min(candidate_scores), index)
+                    if best_target_anchor is None or (
+                        best_target_rank is not None and rank < best_target_rank
+                    ):
+                        best_target_rank = rank
+                        best_target_anchor = anchor
             match_type = 3
             match_score = index
-            if target_key and (
-                target_key in anchor_key or target_key in row_key
-            ):
+            if search_key and (search_key in anchor_key or search_key in row_key):
                 match_type = 1
                 container_length = (
                     len(anchor_key)
-                    if target_key in anchor_key
+                    if search_key in anchor_key
                     else len(row_key)
                 )
-                match_score = max(container_length - len(target_key), 0)
+                match_score = max(container_length - len(search_key), 0)
             else:
                 candidate_scores: List[int] = []
-                anchor_words = self._cosing_lookup_words(anchor_text)
-                if query_words and query_words.issubset(anchor_words):
-                    candidate_scores.append(len(anchor_words) - len(query_words))
-                row_words = self._cosing_lookup_words(row_text)
-                if query_words and query_words.issubset(row_words):
-                    candidate_scores.append(len(row_words) - len(query_words))
+                if search_words and search_words.issubset(anchor_words):
+                    candidate_scores.append(len(anchor_words) - len(search_words))
+                if search_words and search_words.issubset(row_words):
+                    candidate_scores.append(len(row_words) - len(search_words))
                 if candidate_scores:
                     match_type = 2
                     match_score = min(candidate_scores)
             if best_anchor is None or (match_type, match_score) < best_rank:
                 best_rank = (match_type, match_score)
                 best_anchor = anchor
+        if target_key and target_key != search_key:
+            if best_target_anchor is not None:
+                return best_target_anchor
+            return None
+        if best_target_anchor is not None:
+            return best_target_anchor
         return best_anchor
 
     def _is_cosing_detail_page(self, root: Node) -> bool:
@@ -2120,7 +2225,9 @@ class INCIScraper:
                 continue
             label = self._normalize_whitespace(extract_text(cells[0])).lower()
             value_node = cells[1]
-            if label == "cas #":
+            if label == "inci name":
+                record.name = self._normalize_whitespace(extract_text(value_node))
+            elif label == "cas #":
                 record.cas_numbers = self._extract_cosing_values(
                     value_node, split_commas=True
                 )
