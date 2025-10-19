@@ -1004,23 +1004,43 @@ class DetailScraperMixin:
         """Associate label slugs with their corresponding value nodes."""
 
         label_map: Dict[str, Node] = {}
-        for row in root.find_all(class_="ingredient-overview__row"):
-            label = row.find(class_="ingredient-overview__row-title")
-            if not label:
-                continue
-            slug = self._normalize_whitespace(extract_text(label)).lower()
+
+        def register(label_node: Optional[Node], value_node: Optional[Node]) -> None:
+            if not label_node or not value_node:
+                return
+            label_text = self._normalize_whitespace(extract_text(label_node))
+            if not label_text:
+                return
+            slug = label_text.lower().rstrip(":")
+            slug = slug.replace(":", "")
             slug = slug.replace(" ", "-")
-            value = row.find(class_="ingredient-overview__row-content")
-            if value:
-                label_map[slug] = value
+            if slug:
+                label_map[slug] = value_node
+
+        # Newer markup renders metadata rows with generic ``itemprop`` containers.
+        for container in root.find_all(class_="itemprop"):
+            label_node = container.find(class_="label")
+            value_node = container.find(class_="value")
+            if not value_node:
+                value_node = self._find_value_node(label_node)
+            register(label_node, value_node or container)
+
+        # Legacy markup used a dedicated BEM style grid.
+        for row in root.find_all(class_="ingredient-overview__row"):
+            label_node = row.find(class_="ingredient-overview__row-title")
+            value_node = row.find(class_="ingredient-overview__row-content")
+            register(label_node, value_node or row)
         return label_map
 
     def _find_value_node(self, label_node: Node) -> Optional[Node]:
         """Return the sibling value node of ``label_node`` if present."""
 
-        parent = label_node.parent
+        parent = getattr(label_node, "parent", None)
         if not parent:
             return None
+        for child in getattr(parent, "children", []):
+            if isinstance(child, Node) and child.has_class("value"):
+                return child
         for child in parent.children:
             if isinstance(child, Node) and child is not label_node:
                 return child
@@ -1031,15 +1051,22 @@ class DetailScraperMixin:
 
         if node is None:
             return ""
-        value_node = self._find_value_node(node)
-        if value_node is None:
-            return ""
-        return self._normalize_whitespace(extract_text(value_node))
+        target = node
+        if isinstance(node, Node) and not node.has_class("value"):
+            value_node = self._find_value_node(node)
+            if value_node is None:
+                return ""
+            target = value_node
+        return self._normalize_whitespace(extract_text(target))
 
     def _parse_details_text(self, root: Node) -> str:
         """Return the prose detail block as a clean string."""
 
         content_node = root.find(id_="details-text")
+        if not content_node:
+            details_section = root.find(id_="details")
+            if details_section:
+                content_node = details_section.find(class_="content") or details_section
         if not content_node:
             content_node = root.find(class_="detailmore")
         if not content_node:
