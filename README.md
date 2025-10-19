@@ -72,39 +72,9 @@ scraper sunar.
 
 ## Web Arayüzü
 
-Depodaki `ui/` dizini, [bundui/shadcn-admin-dashboard-free](https://github.com/bundui/shadcn-admin-dashboard-free)
-projesinin Next.js 14 tabanlı CRM panosunu barındırır. Shadcn bileşenleri,
-Tailwind CSS ve Recharts gibi yardımcı kütüphaneler `ui/package.json` içinde
-tanımlanmıştır.【F:ui/package.json†L1-L48】 Uygulama düzeni ve navigasyon
-`MainLayout` bileşeninde toplanır; bu bileşen sol kenar çubuğu, üst bar ve tema
-anahtarını sağlar.【F:ui/components/main-layout.tsx†L1-L17】 Varsayılan pano
-`/dashboard/default` rotasında yer alır ve kartlar, çizgi grafikleri ile ödeme
-özetlerini tek sayfada sunar.【F:ui/app/dashboard/default/page.tsx†L1-L45】【F:ui/app/dashboard/default/cards/metric.tsx†L1-L128】
-Ek kullanıcı ve ayar sayfaları `ui/app/dashboard/pages/` altında bulunur, misafir
-oturum akışları ise `(guest)` klasöründe tutulur.【F:ui/app/dashboard/pages/users/page.tsx†L1-L35】【F:ui/app/(guest)/login/page.tsx†L1-L123】
-
-Arayüz tamamen statik örnek verilerle çalışır; grafikler ve tablolar için
-kullanılan diziler bileşen dosyalarında doğrudan tanımlıdır.【F:ui/app/dashboard/default/cards/metric.tsx†L8-L37】【F:ui/app/dashboard/pages/users/data.json†L1-L101】
-Global stiller `globals.scss` dosyasıyla yönetilir ve sayfa `<Inter>` fontuyla
-sunulur.【F:ui/app/globals.scss†L1-L45】【F:ui/app/layout.tsx†L1-L15】
-
-Görsel varlıklar kod içinde dinamik olarak üretilir: avatarlar isimlerden türetilen degrade arka planlar ve baş harflerle
-render edilir, giriş/kayıt sayfalarındaki görseller ise Tailwind tabanlı degrade panellerle değiştirildi. Favicon da
-`app/icon.tsx` dosyasında `ImageResponse` ile çizildiği için depoda ikili dosya barındırmadan şablonun tamamı
-sunulabilir.【F:ui/lib/utils.ts†L9-L36】【F:ui/app/icon.tsx†L1-L32】【F:ui/app/(guest)/login/page.tsx†L19-L33】【F:ui/app/dashboard/pages/users/data-table.tsx†L1-L115】
-
-### Çalıştırma
-
-```bash
-cd ui
-npm install
-npm run dev
-```
-
-Geliştirme sunucusu varsayılan olarak `http://localhost:3000` adresinde açılır.
-Bu kurulum herhangi bir veritabanı veya API bağlantısı gerektirmez; bileşenler
-Shadcn Admin Dashboard Free temasındaki statik CRM görünümünü birebir
-sergilemek için yerleşik veri kümelerini kullanır.【F:ui/app/dashboard/default/cards/metric.tsx†L8-L37】【F:ui/app/dashboard/default/cards/payment.tsx†L42-L73】
+`ui/` dizini şu anda boş bırakılmıştır; proje, gelecekte planlanan bir yönetim
+paneli veya web arayüzü için yer tutucu olarak tutulur. Bu depodaki mevcut
+araçlar yalnızca komut satırı scraper'ını içerir.
 
 ## Gereksinimler
 
@@ -245,7 +215,7 @@ INCIScraper/
 ├── main.py                # Komut satırı arayüzü
 ├── README.md              # Bu dosya
 ├── src/inciscraper/       # Scraper paketinin kaynak kodu
-└── ui/                    # shadcn-ui bileşenleriyle Next.js tabanlı yönetim paneli
+└── ui/                    # Web arayüzü için ayrılmış (boş) dizin
 ```
 
 ## Geliştirme İpuçları
