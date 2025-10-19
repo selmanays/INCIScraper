@@ -34,7 +34,9 @@ scraper sunar.
   ile resmi arama formu doldurularak alınır; CAS/EC numaraları, tanımlanan
   diğer maddeler ve düzenleyici referanslar temizlenip JSON dizileri şeklinde
   depolanır, fonksiyon adları ise baş harfleri büyük olacak biçimde `functions`
-  tablosuna yazılıp ingredient kayıtlarına ID listeleriyle bağlanır.【F:src/inciscraper/scraper.py†L1888-L2050】【F:src/inciscraper/scraper.py†L2051-L2244】
+  tablosuna yazılıp ingredient kayıtlarına ID listeleriyle bağlanır. Slash (`/`)
+  ile alternatif isimler içeren bileşenler CosIng'de otomatik olarak her varyant
+  için sorgulanır.【F:src/inciscraper/scraper.py†L1888-L2060】【F:src/inciscraper/scraper.py†L2061-L2244】
 - **Vurguları bileşen kayıtlarına bağlama:** "Key Ingredients" ve "Other
   Ingredients" bölümlerinde listelenen öğeler ürünün ana bileşen listesiyle
   eşleştirilir ve sonuçlar JSON formatındaki kimlik listeleri olarak saklanır.【F:src/inciscraper/scraper.py†L1587-L1651】
