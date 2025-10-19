@@ -1940,6 +1940,7 @@ class INCIScraper:
                 page.wait_for_load_state("domcontentloaded", timeout=5000)
             except PlaywrightTimeoutError:
                 LOGGER.debug("CosIng search results did not reach idle state", exc_info=True)
+        self._wait_for_cosing_dynamic_content(page)
         html = page.content()
         root = parse_html(html)
         if self._is_cosing_detail_page(root):
@@ -1973,11 +1974,35 @@ class INCIScraper:
                 page.wait_for_load_state("domcontentloaded", timeout=5000)
             except PlaywrightTimeoutError:
                 LOGGER.debug("CosIng detail page did not reach idle state", exc_info=True)
+        self._wait_for_cosing_dynamic_content(page)
         detail_html = page.content()
         detail_root = parse_html(detail_html)
         if self._is_cosing_detail_page(detail_root):
             return detail_html
         return None
+
+    def _wait_for_cosing_dynamic_content(self, page: Any, *, timeout: int = 15000) -> bool:
+        """Wait until CosIng renders either the search results or detail table."""
+
+        if page is None:
+            return False
+
+        selector = (
+            "app-detail-subs table.ecl-table, "
+            "app-results-subs table.ecl-table, "
+            "table.ecl-table"
+        )
+        try:
+            page.wait_for_selector(selector, state="attached", timeout=timeout)
+            return True
+        except PlaywrightTimeoutError:
+            return False
+        except PlaywrightError:
+            LOGGER.debug(
+                "Encountered an error while waiting for CosIng dynamic content",
+                exc_info=True,
+            )
+            return False
 
     def _get_cosing_playwright_page(self) -> Optional[Any]:
         """Return a Playwright page instance ready for CosIng navigation."""
