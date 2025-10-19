@@ -211,7 +211,20 @@ Scraper veritabanını görsel olarak inceleyip düzenlemek için `ui/` dizinind
 Next.js ve [shadcn/ui](https://ui.shadcn.com/) bileşenleriyle hazırlanmış bir
 kontrol paneli yer alır. Arayüz SQLite veritabanındaki tabloları listeler,
 satırları sayfalı olarak gösterir ve hücreleri doğrudan düzenleyip kaydetmeye
-imkân tanır.
+imkân tanır. Güncellenen pano, shadcn dashboard örneğindeki tüm bileşenleri
+INCIScraper içeriğine uyarlayarak sunar:
+
+- Sol kenar çubuğu marka kimliğini ve tablo listesini gösterir; mobilde açılır
+  menü şeklinde kullanılabilir.
+- Üst başlıkta tablo seçici, verileri yenileme kısayolu ve ışık/koyu tema
+  düğmesi bulunur.
+- "Toplam tablo", "Seçili tablo", "Toplam kayıt" ve "Kolon & değişiklik"
+  kartları özet metrikleri vurgular.
+- Kolon dağılımı grafiği tablo şemasındaki veri türlerini görselleştirir,
+  "Tablo özeti" kartı ise birincil anahtar ve LIMIT/OFFSET gibi meta verileri
+  listeler.
+- Durum uyarıları ve düzenlenebilir tablo görünümü dark/light temalarla uyumlu
+  olacak şekilde yeniden tasarlanmıştır.
 
 ### Kurulum ve Çalıştırma
 
