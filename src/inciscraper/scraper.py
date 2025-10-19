@@ -1899,21 +1899,28 @@ class INCIScraper:
         ingredient_name = ingredient_name.strip()
         if not ingredient_name:
             return CosIngRecord()
+        variant_names = self._cosing_variant_names(ingredient_name)
+        variant_keys: Set[str] = set()
+        for name in variant_names:
+            key = self._cosing_lookup_key(name) if name else ""
+            if key:
+                variant_keys.add(key)
         target_key = self._cosing_lookup_key(ingredient_name)
         for search_term in self._cosing_search_terms(ingredient_name):
             detail_html = self._fetch_cosing_detail_via_playwright(
                 search_term,
                 target_name=ingredient_name,
+                target_variants=variant_names,
             )
             if not detail_html:
                 continue
             record = self._parse_cosing_detail_page(detail_html)
             if not record.name:
                 search_key = self._cosing_lookup_key(search_term)
-                if search_key == target_key:
+                if search_key in variant_keys:
                     return record
                 continue
-            if self._cosing_lookup_key(record.name) == target_key:
+            if self._cosing_lookup_key(record.name) in variant_keys:
                 return record
         return CosIngRecord()
 
@@ -1939,6 +1946,7 @@ class INCIScraper:
         search_term: str,
         *,
         target_name: Optional[str] = None,
+        target_variants: Optional[Iterable[str]] = None,
     ) -> Optional[str]:
         """Drive the CosIng interface with Playwright and return detail HTML."""
 
@@ -1997,6 +2005,7 @@ class INCIScraper:
             root,
             query,
             target_name=target_name,
+            target_variants=target_variants,
         )
         if anchor is None:
             return None
@@ -2113,6 +2122,7 @@ class INCIScraper:
         ingredient_name: str,
         *,
         target_name: Optional[str] = None,
+        target_variants: Optional[Iterable[str]] = None,
     ) -> Optional[Node]:
         """Pick the most relevant CosIng search result anchor."""
 
@@ -2127,6 +2137,25 @@ class INCIScraper:
         search_words = self._cosing_lookup_words(search_name)
         target_key = self._cosing_lookup_key(target_name) if target_name else ""
         target_words = self._cosing_lookup_words(target_name) if target_name else set()
+        variant_names = list(target_variants or [])
+        if target_name:
+            variant_names.append(target_name)
+        variant_keys: Set[str] = set()
+        if target_key:
+            variant_keys.add(target_key)
+        variant_word_sets: List[Set[str]] = []
+        if target_words:
+            variant_word_sets.append(target_words)
+        for variant in variant_names:
+            cleaned_variant = variant.replace("\u200b", "").strip()
+            if not cleaned_variant:
+                continue
+            variant_key = self._cosing_lookup_key(cleaned_variant)
+            if variant_key:
+                variant_keys.add(variant_key)
+            variant_words = self._cosing_lookup_words(cleaned_variant)
+            if variant_words:
+                variant_word_sets.append(variant_words)
         best_target_rank: Optional[Tuple[int, int]] = None
         best_target_anchor: Optional[Node] = None
         best_rank: Tuple[int, int] = (4, 0)
@@ -2153,14 +2182,15 @@ class INCIScraper:
             row_key = self._cosing_lookup_key(row_text)
             anchor_words = self._cosing_lookup_words(anchor_text)
             row_words = self._cosing_lookup_words(row_text)
-            if target_key and (anchor_key == target_key or row_key == target_key):
+            if variant_keys and (anchor_key in variant_keys or row_key in variant_keys):
                 return anchor
             if target_key:
                 candidate_scores: List[int] = []
-                if target_words and target_words.issubset(anchor_words):
-                    candidate_scores.append(len(anchor_words) - len(target_words))
-                if target_words and target_words.issubset(row_words):
-                    candidate_scores.append(len(row_words) - len(target_words))
+                for words in variant_word_sets:
+                    if words and words.issubset(anchor_words):
+                        candidate_scores.append(len(anchor_words) - len(words))
+                    if words and words.issubset(row_words):
+                        candidate_scores.append(len(row_words) - len(words))
                 if candidate_scores:
                     rank = (min(candidate_scores), index)
                     if best_target_anchor is None or (
@@ -2190,13 +2220,34 @@ class INCIScraper:
             if best_anchor is None or (match_type, match_score) < best_rank:
                 best_rank = (match_type, match_score)
                 best_anchor = anchor
-        if target_key and target_key != search_key:
+        if variant_keys and search_key not in variant_keys:
             if best_target_anchor is not None:
                 return best_target_anchor
             return None
         if best_target_anchor is not None:
             return best_target_anchor
         return best_anchor
+
+    def _cosing_variant_names(self, ingredient_name: str) -> List[str]:
+        """Return the original CosIng name alongside any slash variants."""
+
+        cleaned = ingredient_name.replace("\u200b", "").strip()
+        if not cleaned:
+            return []
+        variants: List[str] = []
+        parts = [part.strip() for part in cleaned.split("/") if part.strip()]
+        if parts and len(parts) > 1:
+            variants.extend(parts)
+        variants.append(cleaned)
+        unique_variants: List[str] = []
+        seen: Set[str] = set()
+        for variant in variants:
+            key = self._cosing_lookup_key(variant)
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_variants.append(variant)
+        return unique_variants
 
     def _is_cosing_detail_page(self, root: Node) -> bool:
         """Determine whether ``root`` already represents a CosIng detail page."""
