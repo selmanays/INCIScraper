@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import sqlite3
+import time
 import unicodedata
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib import parse
@@ -21,7 +22,12 @@ except ModuleNotFoundError:  # pragma: no cover - fallback when Playwright missi
     PlaywrightTimeoutError = TimeoutError  # type: ignore[assignment]
     sync_playwright = None  # type: ignore[assignment]
 
-from ..constants import COSING_BASE_URL, PROGRESS_LOG_INTERVAL
+from ..constants import (
+    COSING_BASE_URL,
+    INGREDIENT_FETCH_ATTEMPTS,
+    INGREDIENT_PLACEHOLDER_MARKER,
+    PROGRESS_LOG_INTERVAL,
+)
 from ..models import (
     CosIngRecord,
     FreeTag,
@@ -47,6 +53,7 @@ class DetailScraperMixin:
     _cosing_context: Optional[Any]
     _cosing_page: Optional[Any]
     _cosing_playwright_failed: bool
+    _cosing_record_cache: Dict[str, CosIngRecord]
 
     def scrape_product_details(self, *, rescan_all: bool = False) -> None:
         """Download and persist detailed information for each product."""
@@ -476,12 +483,23 @@ class DetailScraperMixin:
             if row:
                 return str(row["id"])
         row = self.conn.execute(
-            "SELECT id FROM ingredients WHERE url = ?",
+            "SELECT id, details_text FROM ingredients WHERE url = ?",
             (ingredient.url,),
         ).fetchone()
-        if row:
+        if row and not self._is_placeholder_details(row["details_text"] or ""):
             return str(row["id"])
-        details = self._scrape_ingredient_page(ingredient.url)
+        if row:
+            LOGGER.info(
+                "Previously stored placeholder for %s – retrying download", ingredient.url
+            )
+        try:
+            details = self._scrape_ingredient_page(ingredient.url)
+        except RuntimeError as exc:
+            LOGGER.error("Unable to download ingredient %s: %s", ingredient.url, exc)
+            if row:
+                return str(row["id"])
+            placeholder = self._build_placeholder_ingredient_details(ingredient, str(exc))
+            return self._store_ingredient_details(placeholder)
         return self._store_ingredient_details(details)
 
     def _ensure_free_tag(self, free_tag: FreeTag) -> str:
@@ -528,10 +546,57 @@ class DetailScraperMixin:
         """Download and parse a single ingredient page."""
 
         LOGGER.info("Fetching ingredient details %s", url)
-        html = self._fetch_html(url)
+        html = self._fetch_html(url, attempts=INGREDIENT_FETCH_ATTEMPTS)
         if html is None:
-            raise RuntimeError(f"Unable to download ingredient page {url}")
+            raise RuntimeError(
+                f"Unable to download ingredient page {url} after {INGREDIENT_FETCH_ATTEMPTS} attempts"
+            )
         return self._parse_ingredient_page(html, url)
+
+    @staticmethod
+    def _is_placeholder_details(details_text: str) -> bool:
+        """Return ``True`` when ``details_text`` represents a placeholder entry."""
+
+        return INGREDIENT_PLACEHOLDER_MARKER in details_text
+
+    def _build_placeholder_ingredient_details(
+        self, ingredient: IngredientReference, reason: str
+    ) -> IngredientDetails:
+        """Create an :class:`IngredientDetails` placeholder when downloads fail."""
+
+        tooltip_summary = (
+            self._normalize_whitespace(ingredient.tooltip_text)
+            if ingredient.tooltip_text
+            else None
+        )
+        reason_summary = (
+            self._normalize_whitespace(str(reason)) if reason else "Unknown error"
+        )
+        reason_summary = reason_summary[:300]
+        message_parts = [
+            "This ingredient record is a temporary placeholder because the source page could not be downloaded.",
+            f"Reason: {reason_summary}",
+            f"Marker: {INGREDIENT_PLACEHOLDER_MARKER}",
+        ]
+        if tooltip_summary:
+            message_parts.append(f"Tooltip excerpt: {tooltip_summary}")
+        details_text = "\n\n".join(message_parts)
+        return IngredientDetails(
+            name=ingredient.name,
+            url=ingredient.url,
+            rating_tag="",
+            also_called=[],
+            irritancy="",
+            comedogenicity="",
+            details_text=details_text,
+            cosing_cas_numbers=[],
+            cosing_ec_numbers=[],
+            cosing_identified_ingredients=[],
+            cosing_regulation_provisions=[],
+            cosing_function_infos=[],
+            quick_facts=[],
+            proof_references=[],
+        )
 
     def _parse_ingredient_page(self, html: str, url: str) -> IngredientDetails:
         """Convert ingredient HTML into a structured :class:`IngredientDetails`."""
@@ -583,14 +648,113 @@ class DetailScraperMixin:
         ingredient_name = ingredient_name.strip()
         if not ingredient_name:
             return CosIngRecord()
-        for search_term in self._cosing_search_terms(ingredient_name):
-            detail_html = self._fetch_cosing_detail_via_playwright(
-                search_term,
-                original_name=ingredient_name,
-            )
-            if detail_html:
-                return self._parse_cosing_detail_page(detail_html)
-        return CosIngRecord()
+        lookup_key = self._cosing_cache_key(ingredient_name)
+        fetch_source = "miss"
+        start_time = time.perf_counter()
+        result: Optional[CosIngRecord] = None
+
+        if lookup_key:
+            cached_record = self._cosing_record_cache.get(lookup_key)
+            if cached_record is not None:
+                fetch_source = "memory"
+                result = cached_record
+        if result is None and lookup_key:
+            cached_html = self._load_cosing_cache_html(lookup_key)
+            if cached_html:
+                try:
+                    result = self._parse_cosing_detail_page(cached_html)
+                    self._cosing_record_cache[lookup_key] = result
+                    fetch_source = "disk"
+                except Exception:  # pragma: no cover - defensive parsing guard
+                    LOGGER.warning(
+                        "Cached CosIng HTML for %s could not be parsed – ignoring entry",
+                        ingredient_name,
+                        exc_info=True,
+                    )
+                    self._delete_cosing_cache_entry(lookup_key)
+
+        if result is None:
+            for search_term in self._cosing_search_terms(ingredient_name):
+                detail_html = self._fetch_cosing_detail_via_playwright(
+                    search_term,
+                    original_name=ingredient_name,
+                )
+                if not detail_html:
+                    continue
+                try:
+                    result = self._parse_cosing_detail_page(detail_html)
+                except Exception:  # pragma: no cover - defensive parsing guard
+                    LOGGER.warning(
+                        "Failed to parse CosIng HTML for %s", ingredient_name, exc_info=True
+                    )
+                    continue
+                fetch_source = "network"
+                if lookup_key:
+                    self._store_cosing_cache_html(
+                        lookup_key,
+                        detail_html,
+                        search_term,
+                    )
+                    self._cosing_record_cache[lookup_key] = result
+                break
+
+        if result is None:
+            result = CosIngRecord()
+            if lookup_key and lookup_key not in self._cosing_record_cache:
+                self._cosing_record_cache[lookup_key] = result
+
+        elapsed = time.perf_counter() - start_time
+        LOGGER.debug(
+            "CosIng lookup for %s completed in %.2fs (%s)",
+            ingredient_name,
+            elapsed,
+            fetch_source,
+        )
+        return result
+
+    def _cosing_cache_key(self, ingredient_name: str) -> str:
+        """Normalise ingredient names so cache lookups remain stable."""
+
+        return self._cosing_lookup_key(ingredient_name)
+
+    def _load_cosing_cache_html(self, lookup_key: str) -> Optional[str]:
+        """Return cached CosIng HTML for ``lookup_key`` if available."""
+
+        row = self.conn.execute(
+            "SELECT detail_html FROM cosing_cache WHERE lookup_key = ?",
+            (lookup_key,),
+        ).fetchone()
+        if row is None:
+            return None
+        return row["detail_html"] or None
+
+    def _store_cosing_cache_html(
+        self,
+        lookup_key: str,
+        detail_html: str,
+        search_term: str,
+    ) -> None:
+        """Persist CosIng HTML responses for reuse in future runs."""
+
+        now = self._current_timestamp()
+        self.conn.execute(
+            """
+            INSERT INTO cosing_cache (lookup_key, detail_html, source_term, last_updated_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(lookup_key) DO UPDATE SET
+                detail_html = excluded.detail_html,
+                source_term = excluded.source_term,
+                last_updated_at = excluded.last_updated_at
+            """,
+            (lookup_key, detail_html, search_term, now),
+        )
+        self.conn.commit()
+
+    def _delete_cosing_cache_entry(self, lookup_key: str) -> None:
+        """Remove stale CosIng cache entries that can no longer be parsed."""
+
+        self.conn.execute("DELETE FROM cosing_cache WHERE lookup_key = ?", (lookup_key,))
+        self.conn.commit()
 
     def _cosing_search_terms(self, ingredient_name: str) -> List[str]:
         """Return CosIng search fallbacks for names with slash-separated variants."""

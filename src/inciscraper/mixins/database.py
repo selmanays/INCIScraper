@@ -85,7 +85,17 @@ class DatabaseMixin:
                 key TEXT PRIMARY KEY,
                 value TEXT
             );
+
+            CREATE TABLE IF NOT EXISTS cosing_cache (
+                lookup_key TEXT PRIMARY KEY,
+                detail_html TEXT,
+                source_term TEXT,
+                last_updated_at TEXT NOT NULL
+            );
             """
+        )
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cosing_cache_source_term ON cosing_cache(source_term)"
         )
         self.conn.commit()
         self._ensure_ingredient_details_capacity()

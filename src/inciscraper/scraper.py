@@ -63,6 +63,7 @@ class INCIScraper(
         self._cosing_context = None
         self._cosing_page = None
         self._cosing_playwright_failed = False
+        self._cosing_record_cache: dict[str, "CosIngRecord"] = {}
         self._init_db()
 
     # ------------------------------------------------------------------
