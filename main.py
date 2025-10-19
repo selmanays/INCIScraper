@@ -4,6 +4,8 @@ from __future__ import annotations
 import argparse
 import logging
 from pathlib import Path
+from typing import Optional
+
 from inciscraper import INCIScraper
 
 
@@ -19,14 +21,15 @@ def build_parser() -> argparse.ArgumentParser:
             "and persist the results into a local SQLite database."
         )
     )
+    default_data_dir = Path("data")
     parser.add_argument(
         "--db",
-        default="incidecoder.db",
-        help="SQLite database path (default: incidecoder.db)",
+        default=str(default_data_dir / "incidecoder.db"),
+        help="SQLite database path (default: data/incidecoder.db)",
     )
     parser.add_argument(
         "--images-dir",
-        default="images",
+        default=str(default_data_dir / "images"),
         help="Directory where downloaded product images will be stored",
     )
     parser.add_argument(
@@ -69,9 +72,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--log-level",
-        default="INFO",
+        default="ERROR",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Logging verbosity",
+        help=(
+            "Logging verbosity (default: ERROR). Use INFO or DEBUG to capture the full pipeline."
+        ),
+    )
+    parser.add_argument(
+        "--log-output",
+        action="store_true",
+        help=(
+            "Write log output to data/logs/inciscraper.log in addition to the console"
+        ),
     )
     parser.add_argument(
         "--sample-data",
@@ -85,16 +97,27 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def configure_logging(level: str) -> None:
+def configure_logging(level: str, *, log_to_file: bool = False) -> Optional[Path]:
     """Initialise the logging configuration for the CLI.
 
     Türkçe: Komut satırı aracının günlük yapılandırmasını verilen ayrıntı
     seviyesine göre kurar.
     """
+    log_level = getattr(logging, level.upper(), logging.ERROR)
+    handlers = [logging.StreamHandler()]
+    log_file_path: Optional[Path] = None
+    if log_to_file:
+        logs_dir = Path("data") / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        log_file_path = logs_dir / "inciscraper.log"
+        handlers.append(logging.FileHandler(log_file_path, encoding="utf-8"))
     logging.basicConfig(
-        level=getattr(logging, level.upper(), logging.INFO),
+        level=log_level,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=handlers,
+        force=True,
     )
+    return log_file_path
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -108,16 +131,24 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.max_pages is not None and args.max_pages < 1:
         parser.error("--max-pages must be a positive integer")
-    configure_logging(args.log_level)
+    log_file = configure_logging(args.log_level, log_to_file=args.log_output)
+    if log_file:
+        print(f"Logging to {log_file}")
     db_path = args.db
+    images_dir = Path(args.images_dir)
+    if args.sample_data:
+        images_dir = Path("data") / "sample_images"
+    images_dir.mkdir(parents=True, exist_ok=True)
     if args.sample_data:
         db_path_obj = Path(db_path)
         if not db_path_obj.name.startswith("sample_"):
             db_path_obj = db_path_obj.with_name(f"sample_{db_path_obj.name}")
         db_path = str(db_path_obj)
+    db_path_obj = Path(db_path)
+    db_path_obj.parent.mkdir(parents=True, exist_ok=True)
     scraper = INCIScraper(
         db_path=db_path,
-        image_dir=args.images_dir,
+        image_dir=str(images_dir),
         base_url=args.base_url,
         alternate_base_urls=args.alternate_base_url,
     )
