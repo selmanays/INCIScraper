@@ -1018,6 +1018,11 @@ class INCIScraper:
         detail_tables = {
             "ingredients",
             "functions",
+            # Legacy name for ``functions`` prior to the Playwright migration.
+            # Databases created before the rename will see ``ingredient_functions``
+            # dropped during schema reconciliation, which must also invalidate
+            # cached ingredient detail progress so CosIng data is re-scraped.
+            "ingredient_functions",
         }
         if detail_tables & dropped_tables and products_available:
             LOGGER.info(
