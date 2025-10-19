@@ -74,6 +74,7 @@ class BrandScraperMixin:
             if not brands:
                 LOGGER.debug("No more brands found on %s", current_url)
                 break
+            limit_reached = False
             for name, url in brands:
                 inserted = self._insert_brand(name, url)
                 if (
@@ -84,10 +85,13 @@ class BrandScraperMixin:
                 ):
                     LOGGER.info("Reached brand limit (%s) – stopping", max_brands)
                     final_total = max(final_total, offset)
+                    limit_reached = True
                     break
             processed_pages += 1
             if processed_pages % PROGRESS_LOG_INTERVAL == 0:
                 self._log_progress("Brand page", processed_pages, planned_pages)
+            if limit_reached:
+                break
             offset += 1
             final_total = max(final_total, offset - 1)
             time.sleep(REQUEST_SLEEP)
