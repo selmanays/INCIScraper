@@ -73,7 +73,7 @@ class DatabaseMixin:
             CREATE TABLE IF NOT EXISTS functions (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
-                url TEXT NOT NULL UNIQUE,
+                url TEXT UNIQUE,
                 description TEXT
             );
 
@@ -91,6 +91,7 @@ class DatabaseMixin:
         )
         self.conn.commit()
         self._ensure_ingredient_details_capacity()
+        self._ensure_functions_allow_null_urls()
 
     # ------------------------------------------------------------------
     # Metadata helpers
@@ -218,6 +219,38 @@ class DatabaseMixin:
             f"INSERT INTO ingredients ({columns}) SELECT {columns} FROM ingredients_backup",
         )
         self.conn.execute("DROP TABLE ingredients_backup")
+        self.conn.commit()
+
+    def _ensure_functions_allow_null_urls(self) -> None:
+        """Rebuild the functions table if ``url`` is incorrectly NOT NULL."""
+
+        cursor = self.conn.execute("PRAGMA table_info(functions)")
+        rows = cursor.fetchall()
+        url_row = None
+        for row in rows:
+            if row["name"] == "url":
+                url_row = row
+                break
+        if not url_row or not url_row["notnull"]:
+            return
+        LOGGER.info(
+            "Rebuilding functions table to allow NULL url entries",
+        )
+        self.conn.execute("ALTER TABLE functions RENAME TO functions_backup")
+        self.conn.executescript(
+            """
+            CREATE TABLE functions (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                url TEXT UNIQUE,
+                description TEXT
+            );
+            INSERT INTO functions (id, name, url, description)
+            SELECT id, name, NULLIF(TRIM(url), ''), description
+            FROM functions_backup;
+            DROP TABLE functions_backup;
+            """
+        )
         self.conn.commit()
 
     def _enforce_schema(self) -> None:
