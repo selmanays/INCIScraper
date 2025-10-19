@@ -425,8 +425,6 @@ class DetailScraperMixin:
             (product_id,),
         ).fetchone()
         now = self._current_timestamp()
-        if image_path is None and existing and existing["image_path"]:
-            payload["image_path"] = existing["image_path"]
         if existing is None:
             self.conn.execute(
                 """
@@ -618,18 +616,11 @@ class DetailScraperMixin:
         details_text = self._parse_details_text(root)
         quick_facts = self._parse_quick_facts(root)
         proof_references = self._parse_proof_references(root)
-        raw_also_called = extract_text(also_called_node) if also_called_node else ""
-        also_called_values: List[str] = []
-        if raw_also_called:
-            for part in re.split(r"[,;\n]", raw_also_called):
-                candidate = self._normalize_whitespace(part)
-                if candidate and candidate not in also_called_values:
-                    also_called_values.append(candidate)
         return IngredientDetails(
             name=name,
             url=url,
             rating_tag=rating_tag,
-            also_called=also_called_values,
+            also_called=extract_text(also_called_node) if also_called_node else "",
             irritancy=self._extract_label_text(irritancy_node),
             comedogenicity=self._extract_label_text(comedogenicity_node),
             details_text=details_text,
@@ -1317,11 +1308,7 @@ class DetailScraperMixin:
         payload: Dict[str, object] = {
             "name": details.name,
             "rating_tag": details.rating_tag,
-            "also_called": json.dumps(
-                details.also_called,
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ),
+            "also_called": details.also_called,
             "cosing_function_ids_json": json.dumps(
                 cosing_function_ids,
                 ensure_ascii=False,
@@ -1394,7 +1381,7 @@ class DetailScraperMixin:
                             details.name,
                             details.url,
                             details.rating_tag,
-                            payload["also_called"],
+                            details.also_called,
                             payload["cosing_function_ids_json"],
                             details.irritancy,
                             details.comedogenicity,
@@ -1446,31 +1433,51 @@ class DetailScraperMixin:
     def _ensure_ingredient_function(self, info: IngredientFunctionInfo) -> Optional[str]:
         """Ensure an ingredient function entry exists and return its id."""
 
-        raw_name = self._normalize_whitespace(info.name)
-        if not raw_name:
+        name = info.name.strip()
+        url = info.url.strip() if info.url else None
+        if not url:
+            url = None
+        description = info.description.strip()
+        if not name and not url:
             return None
-        row = self.conn.execute(
-            """
-            SELECT id, name
-            FROM functions
-            WHERE LOWER(name) = LOWER(?)
-            """,
-            (raw_name,),
-        ).fetchone()
+        row = None
+        if url:
+            row = self.conn.execute(
+                "SELECT id, name, description FROM functions WHERE url = ?",
+                (url,),
+            ).fetchone()
+        if row is None:
+            row = self.conn.execute(
+                """
+                SELECT id, name, description
+                FROM functions
+                WHERE url IS NULL AND name = ?
+                """,
+                (name,),
+            ).fetchone()
         if row:
-            stored_name = self._normalize_whitespace(row["name"] or "")
-            if stored_name != raw_name:
+            updates: Dict[str, str] = {}
+            if name and name != row["name"]:
+                updates["name"] = name
+            if description and description != (row["description"] or ""):
+                updates["description"] = description
+            if updates:
+                assignments = ", ".join(f"{col} = ?" for col in updates)
+                params = list(updates.values()) + [row["id"]]
                 self.conn.execute(
-                    "UPDATE functions SET name = ? WHERE id = ?",
-                    (raw_name, row["id"]),
+                    f"UPDATE functions SET {assignments} WHERE id = ?",
+                    params,
                 )
             return str(row["id"])
         while True:
             function_id = self._generate_id()
             try:
                 self.conn.execute(
-                    "INSERT INTO functions (id, name) VALUES (?, ?)",
-                    (function_id, raw_name),
+                    """
+                    INSERT INTO functions (id, name, url, description)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (function_id, name, url, description),
                 )
             except sqlite3.IntegrityError as exc:  # pragma: no cover - rare id collision
                 if "functions.id" in str(exc):
