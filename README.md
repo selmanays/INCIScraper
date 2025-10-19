@@ -36,7 +36,9 @@ scraper sunar.
   depolanır, fonksiyon adları ise baş harfleri büyük olacak biçimde `functions`
   tablosuna yazılıp ingredient kayıtlarına ID listeleriyle bağlanır. Slash (`/`)
   ile alternatif isimler içeren bileşenler CosIng'de otomatik olarak her varyant
-  için sorgulanır.【F:src/inciscraper/scraper.py†L1888-L2060】【F:src/inciscraper/scraper.py†L2061-L2244】
+  için sırayla sorgulanır ve sonuçlar birleşik isim dönen kayda ulaşılana kadar
+  kontrol edilir; böylece arayüz tek terimle sonuç vermediğinde bile veri
+  kaçmaz.【F:src/inciscraper/scraper.py†L1888-L2060】【F:src/inciscraper/scraper.py†L2061-L2244】
 - **Vurguları bileşen kayıtlarına bağlama:** "Key Ingredients" ve "Other
   Ingredients" bölümlerinde listelenen öğeler ürünün ana bileşen listesiyle
   eşleştirilir ve sonuçlar JSON formatındaki kimlik listeleri olarak saklanır.【F:src/inciscraper/scraper.py†L1587-L1651】

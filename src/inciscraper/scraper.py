@@ -1983,7 +1983,16 @@ class INCIScraper:
         root = parse_html(html)
         if self._is_cosing_detail_page(root):
             return html
-        anchor = self._find_cosing_result_anchor(root, query)
+        expected_name = None
+        if original_name:
+            expected_name = self._normalize_whitespace(original_name)
+            if "/" not in original_name:
+                expected_name = None
+        anchor = self._find_cosing_result_anchor(
+            root,
+            query,
+            expected_name=expected_name,
+        )
         if anchor is None:
             return None
         href = anchor.get("href")
@@ -2093,7 +2102,13 @@ class INCIScraper:
         LOGGER.error("No supported Playwright browsers are available for CosIng lookups")
         return None
 
-    def _find_cosing_result_anchor(self, root: Node, ingredient_name: str) -> Optional[Node]:
+    def _find_cosing_result_anchor(
+        self,
+        root: Node,
+        ingredient_name: str,
+        *,
+        expected_name: Optional[str] = None,
+    ) -> Optional[Node]:
         """Pick the most relevant CosIng search result anchor."""
 
         table = root.find(tag="table")
@@ -2104,6 +2119,16 @@ class INCIScraper:
             return None
         target_key = self._cosing_lookup_key(search_name)
         query_words = self._cosing_lookup_words(search_name)
+        expected_key = (
+            self._cosing_lookup_key(expected_name)
+            if expected_name
+            else ""
+        )
+        expected_words = (
+            self._cosing_lookup_words(expected_name)
+            if expected_name
+            else set()
+        )
         best_rank: Tuple[int, int] = (4, 0)
         best_anchor: Optional[Node] = None
         for index, anchor in enumerate(table.find_all(tag="a")):
@@ -2126,7 +2151,17 @@ class INCIScraper:
                 else anchor_text
             )
             row_key = self._cosing_lookup_key(row_text)
-            if anchor_key == target_key or row_key == target_key:
+            anchor_words = self._cosing_lookup_words(anchor_text)
+            row_words = self._cosing_lookup_words(row_text)
+            if expected_key:
+                if anchor_key == expected_key or row_key == expected_key:
+                    return anchor
+            elif anchor_key == target_key or row_key == target_key:
+                return anchor
+            if expected_words and (
+                expected_words.issubset(anchor_words)
+                or expected_words.issubset(row_words)
+            ):
                 return anchor
             match_type = 3
             match_score = index
@@ -2142,10 +2177,8 @@ class INCIScraper:
                 match_score = max(container_length - len(target_key), 0)
             else:
                 candidate_scores: List[int] = []
-                anchor_words = self._cosing_lookup_words(anchor_text)
                 if query_words and query_words.issubset(anchor_words):
                     candidate_scores.append(len(anchor_words) - len(query_words))
-                row_words = self._cosing_lookup_words(row_text)
                 if query_words and query_words.issubset(row_words):
                     candidate_scores.append(len(row_words) - len(query_words))
                 if candidate_scores:
@@ -2154,6 +2187,8 @@ class INCIScraper:
             if best_anchor is None or (match_type, match_score) < best_rank:
                 best_rank = (match_type, match_score)
                 best_anchor = anchor
+        if expected_key:
+            return None
         return best_anchor
 
     def _is_cosing_detail_page(self, root: Node) -> bool:
