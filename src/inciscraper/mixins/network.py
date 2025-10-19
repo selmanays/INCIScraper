@@ -340,8 +340,8 @@ class NetworkMixin:
             return None
         suffix = self._guess_extension(image_url)
         data, suffix = self._compress_image(data, suffix)
-        slug = self._slugify(product_name) or "product"
-        filename = f"{slug}-{product_id[:8]}_cover{suffix}"
+        slug = self._slugify(product_name)
+        filename = f"{slug}-{product_id[:8]}{suffix}"
         path = self.image_dir / filename
         path.write_bytes(data)
         return str(path)
