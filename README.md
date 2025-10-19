@@ -26,6 +26,11 @@ scraper sunar.
 - **Ağ hatası toleransı:** DNS sorunlarında alternatif alan adlarına geçer,
   DNS-over-HTTPS ile IP çözer ve gerekirse doğrudan IP üzerinden TLS bağlantısı
   kurar.【F:src/inciscraper/mixins/network.py†L49-L273】
+- **Bileşen indirme yedekleri:** Ingredient sayfaları art arda 500 veya timeout
+  hataları döndüğünde indirme denemelerini altı seferden fazla tekrarlar;
+  başarısızlık devam ederse ürün akışını durdurmak yerine otomatik bir
+  placeholder kaydı oluşturarak sürecin tamamlanmasını sağlar. Placeholder
+  satırları sonraki çalıştırmalarda yeniden indirilmeyi dener.【F:src/inciscraper/constants.py†L10-L11】【F:src/inciscraper/mixins/details.py†L470-L519】
 - **Görsel optimizasyonu:** Ürün görselleri indirilip WebP (mümkünse lossless)
   olarak sıkıştırılır; Pillow bulunamazsa orijinal veri saklanır.【F:src/inciscraper/mixins/network.py†L328-L407】
 - **Zengin bileşen içerikleri:** Detay metni paragrafların yanı sıra madde
