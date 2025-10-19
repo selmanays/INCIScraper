@@ -42,6 +42,13 @@ scraper sunar.
   bulunamazsa ilgili varyantın kendisi tam eşleşme verdiğinde doğrudan o sonuç
   açılır. Böylece arayüz tek terimle sonuç vermediğinde bile veri
   kaçmaz.【F:src/inciscraper/mixins/details.py†L102-L448】【F:src/inciscraper/mixins/details.py†L726-L918】
+- **CosIng önbelleği ve metrikler:** Resmi portaldan indirilen HTML yanıtları
+  normalize edilmiş isim anahtarlarıyla SQLite tabanlı bir cache tablosunda
+  saklanır ve çalışma süresi boyunca bellekte tutulur. Bozuk kayıtlar tespit
+  edildiğinde otomatik olarak temizlenir; her arama için toplam süre ve hangi
+  kaynaktan (bellek/disk/ağ) geldiği DEBUG loglarına yazılır. Böylece tekrar
+  eden ürünlerde Playwright bekleme süreleri minimize edilir ve darboğazlar
+  kolayca ölçülür.【F:src/inciscraper/mixins/details.py†L580-L667】【F:src/inciscraper/mixins/details.py†L669-L712】【F:src/inciscraper/mixins/database.py†L19-L52】
 - **Vurguları bileşen kayıtlarına bağlama:** "Key Ingredients" ve "Other
   Ingredients" bölümlerinde listelenen öğeler ürünün ana bileşen listesiyle
   eşleştirilir ve sonuçlar JSON formatındaki kimlik listeleri olarak saklanır.【F:src/inciscraper/mixins/details.py†L157-L335】
@@ -148,6 +155,10 @@ Scraper aşağıdaki tabloları oluşturur ve kontrol eder:
   tooltip açıklamalarını saklar; ürünler bu tablodaki kimliklere bağlanır.【F:src/inciscraper/mixins/database.py†L80-L84】【F:src/inciscraper/mixins/details.py†L485-L520】
 - **metadata** – Kaldığı yerden devam edebilmek için kullanılan yardımcı
   anahtar/değer deposu.【F:src/inciscraper/mixins/database.py†L86-L132】
+- **cosing_cache** – CosIng sorgularının normalize edilmiş anahtarlarıyla
+  saklanan HTML yanıtları, kullanılan arama terimi ve son güncelleme damgası.
+  Uygulama bozulmuş kayıtları otomatik temizleyip yeni sonuçlarla
+  günceller.【F:src/inciscraper/mixins/database.py†L19-L52】【F:src/inciscraper/mixins/details.py†L620-L667】
 
 Schema ve kolonlar uygulama tarafından doğrulanır; beklenmeyen tablo veya
 sütunlar tespit edilirse kaldırılır.【F:src/inciscraper/mixins/database.py†L223-L280】
