@@ -146,12 +146,42 @@ class DetailScraperMixin:
     def _extract_product_image(self, product_block: Node) -> Optional[str]:
         """Return the hero image URL for the product if available."""
 
-        image_container = product_block.find(class_="product__image")
+        image_container = (
+            product_block.find(class_="product__image")
+            or product_block.find(id_="product-main-image")
+        )
         if not image_container:
             return None
         img_tag = image_container.find(tag="img")
-        if img_tag and img_tag.get("src"):
-            return self._absolute_url(img_tag.get("src"))
+        if not img_tag:
+            sources = image_container.find_all(tag="source")
+            for source in sources:
+                srcset = source.get("srcset")
+                if not srcset:
+                    continue
+                first_entry = srcset.split(",", 1)[0].strip().split(" ", 1)[0]
+                if first_entry:
+                    return self._absolute_url(first_entry)
+            return None
+        candidates = [
+            img_tag.get("src"),
+            img_tag.get("data-src"),
+            img_tag.get("data-original"),
+            img_tag.get("data-srcset"),
+            img_tag.get("srcset"),
+        ]
+        for candidate in candidates:
+            if not candidate:
+                continue
+            value = candidate.strip()
+            if not value:
+                continue
+            if " " in value and "," in value:
+                first_entry = value.split(",", 1)[0]
+                value = first_entry.strip().split(" ", 1)[0]
+            elif " " in value and value.count("http") <= 1:
+                value = value.split(" ", 1)[0]
+            return self._absolute_url(value)
         return None
 
     def _build_tooltip_index(self, root: Node) -> Dict[str, Node]:

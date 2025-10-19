@@ -61,12 +61,31 @@ class WorkloadMixin:
         pending_brands = self.conn.execute(
             "SELECT COUNT(*) FROM brands WHERE products_scraped = 0",
         ).fetchone()[0]
+        total_products = self.conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
         pending_products = self.conn.execute(
             "SELECT COUNT(*) FROM products WHERE details_scraped = 0",
         ).fetchone()[0]
+        next_offset_raw = self._get_metadata("brands_next_offset", "1") or "1"
+        total_offsets_raw = self._get_metadata("brands_total_offsets", "0") or "0"
+        try:
+            next_offset = max(int(next_offset_raw), 1)
+        except (TypeError, ValueError):
+            next_offset = 1
+        try:
+            total_offsets = max(int(total_offsets_raw), 0)
+        except (TypeError, ValueError):
+            total_offsets = 0
+        if total_offsets:
+            remaining = total_offsets - (next_offset - 1)
+            brand_pages_remaining: Optional[int] = max(remaining, 0)
+        else:
+            brand_pages_remaining = None
         summary = {
             "brands_total": int(total_brands),
             "brands_pending": int(pending_brands),
+            "brands_pending_products": int(pending_brands),
+            "brand_pages_remaining": brand_pages_remaining,
+            "products_total": int(total_products),
             "products_pending_details": int(pending_products),
         }
         return summary
