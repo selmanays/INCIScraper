@@ -1898,32 +1898,68 @@ class INCIScraper:
         ingredient_name = ingredient_name.strip()
         if not ingredient_name:
             return CosIngRecord()
-        detail_html = self._fetch_cosing_detail_via_playwright(ingredient_name)
-        if not detail_html:
-            return CosIngRecord()
-        return self._parse_cosing_detail_page(detail_html)
+        for search_term in self._cosing_search_terms(ingredient_name):
+            detail_html = self._fetch_cosing_detail_via_playwright(
+                search_term,
+                original_name=ingredient_name,
+            )
+            if detail_html:
+                return self._parse_cosing_detail_page(detail_html)
+        return CosIngRecord()
 
-    def _fetch_cosing_detail_via_playwright(self, ingredient_name: str) -> Optional[str]:
+    def _cosing_search_terms(self, ingredient_name: str) -> List[str]:
+        """Return CosIng search fallbacks for names with slash-separated variants."""
+
+        cleaned = ingredient_name.replace("\u200b", "").strip()
+        if not cleaned:
+            return []
+        terms: List[str] = []
+        if "/" in cleaned:
+            for part in cleaned.split("/"):
+                normalised = self._normalize_whitespace(part)
+                if normalised and normalised not in terms:
+                    terms.append(normalised)
+        full_name = self._normalize_whitespace(cleaned)
+        if full_name and full_name not in terms:
+            terms.append(full_name)
+        return terms
+
+    def _fetch_cosing_detail_via_playwright(
+        self,
+        search_term: str,
+        *,
+        original_name: Optional[str] = None,
+    ) -> Optional[str]:
         """Drive the CosIng interface with Playwright and return detail HTML."""
 
         page = self._get_cosing_playwright_page()
         if page is None:
             return None
+        query = search_term.strip()
+        if not query:
+            return None
+        display_name = original_name or query
         base_url = COSING_BASE_URL if COSING_BASE_URL.endswith("/") else f"{COSING_BASE_URL}/"
         try:
             page.goto(base_url, wait_until="domcontentloaded", timeout=15000)
         except PlaywrightTimeoutError:
-            LOGGER.warning("Timed out while loading CosIng search page for %s", ingredient_name)
+            LOGGER.warning(
+                "Timed out while loading CosIng search page for %s", display_name
+            )
             return None
         except PlaywrightError:
-            LOGGER.warning("Failed to load CosIng search page for %s", ingredient_name, exc_info=True)
+            LOGGER.warning(
+                "Failed to load CosIng search page for %s", display_name, exc_info=True
+            )
             return None
         try:
             input_locator = page.locator("input#keyword")
             input_locator.wait_for(state="visible", timeout=5000)
-            input_locator.fill(ingredient_name)
+            input_locator.fill(query)
         except PlaywrightError as exc:
-            LOGGER.warning("Unable to populate CosIng search input for %s: %s", ingredient_name, exc)
+            LOGGER.warning(
+                "Unable to populate CosIng search input for %s: %s", display_name, exc
+            )
             return None
         try:
             button_locator = page.locator("button.ecl-button--primary[type=submit]")
@@ -1931,7 +1967,9 @@ class INCIScraper:
                 button_locator = page.locator("button[type=submit]")
             button_locator.first.click()
         except PlaywrightError as exc:
-            LOGGER.warning("Unable to submit CosIng search for %s: %s", ingredient_name, exc)
+            LOGGER.warning(
+                "Unable to submit CosIng search for %s: %s", display_name, exc
+            )
             return None
         try:
             page.wait_for_load_state("networkidle", timeout=15000)
@@ -1945,7 +1983,7 @@ class INCIScraper:
         root = parse_html(html)
         if self._is_cosing_detail_page(root):
             return html
-        anchor = self._find_cosing_result_anchor(root, ingredient_name)
+        anchor = self._find_cosing_result_anchor(root, query)
         if anchor is None:
             return None
         href = anchor.get("href")
@@ -1963,7 +2001,7 @@ class INCIScraper:
             LOGGER.warning(
                 "Failed to open CosIng search result %s for %s: %s",
                 href,
-                ingredient_name,
+                display_name,
                 exc,
             )
             return None
