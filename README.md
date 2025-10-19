@@ -166,11 +166,40 @@ tekrarı oluşturmaz.
 INCIScraper/
 ├── main.py                # Komut satırı arayüzü
 ├── README.md              # Bu dosya
-└── src/inciscraper/
-    ├── __init__.py        # Paket giriş noktası
-    ├── parser.py          # Özel HTML parser & yardımcılar
-    └── scraper.py         # Scraper iş mantığı ve veri katmanı
+├── src/inciscraper/       # Scraper paketinin kaynak kodu
+└── ui/                    # shadcn-ui bileşenleriyle Next.js tabanlı yönetim paneli
 ```
+
+## Web Arayüzü
+
+Scraper veritabanını görsel olarak inceleyip düzenlemek için `ui/` dizininde
+Next.js ve [shadcn/ui](https://ui.shadcn.com/) bileşenleriyle hazırlanmış bir
+kontrol paneli yer alır. Arayüz SQLite veritabanındaki tabloları listeler,
+satırları sayfalı olarak gösterir ve hücreleri doğrudan düzenleyip kaydetmeye
+imkân tanır.
+
+### Kurulum ve Çalıştırma
+
+```bash
+cd ui
+npm install
+npm run dev
+```
+
+Varsayılan olarak arayüz depo kökündeki `incidecoder.db` dosyasına bağlanır.
+Farklı bir veritabanı kullanmak için `DATABASE_PATH` ortam değişkenini
+tanımlayabilirsiniz:
+
+```bash
+DATABASE_PATH=/path/to/your.db npm run dev
+```
+
+Sunucu varsayılan olarak `http://localhost:3000` adresinde çalışır. Tarayıcıda
+tablo seçici üzerinden veri tabanındaki tablolar arasında geçiş yapabilir,
+hücreleri düzenledikten sonra **Kaydet** düğmesiyle toplu olarak
+güncelleyebilirsiniz. Birincil anahtar sütunları koruma amacıyla yalnızca
+okunur olarak gelir; diğer alanlar düzenlenebilir. Sorgular satır sayfa boyutu
+ve sayfa numarasına göre sınırlanır.
 
 ## Geliştirme İpuçları
 
