@@ -30,6 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Directory where downloaded product images will be stored",
     )
     parser.add_argument(
+        "--log-dir",
+        default="logs",
+        help="Directory where scraper run log files will be written",
+    )
+    parser.add_argument(
         "--base-url",
         default="https://incidecoder.com",
         help="Override the INCIDecoder base URL (useful for testing)",
@@ -118,6 +123,7 @@ def main(argv: list[str] | None = None) -> int:
     scraper = INCIScraper(
         db_path=db_path,
         image_dir=args.images_dir,
+        log_dir=args.log_dir,
         base_url=args.base_url,
         alternate_base_urls=args.alternate_base_url,
     )

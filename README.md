@@ -26,15 +26,18 @@ scraper sunar.
 - **Ağ hatası toleransı:** DNS sorunlarında alternatif alan adlarına geçer,
   DNS-over-HTTPS ile IP çözer ve gerekirse doğrudan IP üzerinden TLS bağlantısı
   kurar.【F:src/inciscraper/scraper.py†L2066-L2396】
+- **Çalışma başına log dosyası:** Her scraper örneği çalıştığında `logs/`
+  dizinine zaman damgalı bir günlük dosyası oluşturulur; kök logger INFO
+  seviyesine çekilerek tüm adımlar dosyaya kaydedilir.【F:src/inciscraper/scraper.py†L292-L328】【F:src/inciscraper/scraper.py†L704-L714】
 - **Görsel optimizasyonu:** Ürün görselleri indirilip WebP (mümkünse lossless)
   olarak sıkıştırılır; Pillow bulunamazsa orijinal veri saklanır.【F:src/inciscraper/scraper.py†L2408-L2475】
 - **Zengin bileşen içerikleri:** Detay metni paragrafların yanı sıra madde
   işaretli listeleri de koruyacak biçimde ayrıştırılır; Quick Facts ve "Show me
-  some proof" bölümleri JSON olarak saklanır. COSING verileri artık doğrudan
-  Avrupa Komisyonu portalından taranır; CAS/EC numaraları, tanımlanan diğer
-  maddeler ve düzenleyici referanslar temizlenip JSON dizileri şeklinde
-  depolanır, fonksiyonlar ise ayrı bir tabloya büyük harfle başlayan biçimiyle
-  bağlanır.【F:src/inciscraper/scraper.py†L1878-L2013】【F:src/inciscraper/scraper.py†L2068-L2147】【F:src/inciscraper/scraper.py†L2152-L2238】
+  some proof" bölümleri JSON olarak saklanır. CosIng verileri artık Playwright
+  ile resmi arama formu doldurularak alınır; CAS/EC numaraları, tanımlanan
+  diğer maddeler ve düzenleyici referanslar temizlenip JSON dizileri şeklinde
+  depolanır, fonksiyon adları ise baş harfleri büyük olacak biçimde `functions`
+  tablosuna yazılıp ingredient kayıtlarına ID listeleriyle bağlanır.【F:src/inciscraper/scraper.py†L1888-L2050】【F:src/inciscraper/scraper.py†L2051-L2244】
 - **Vurguları bileşen kayıtlarına bağlama:** "Key Ingredients" ve "Other
   Ingredients" bölümlerinde listelenen öğeler ürünün ana bileşen listesiyle
   eşleştirilir ve sonuçlar JSON formatındaki kimlik listeleri olarak saklanır.【F:src/inciscraper/scraper.py†L1587-L1651】
@@ -47,6 +50,9 @@ scraper sunar.
 ## Gereksinimler
 
 - Python 3.11 veya üzeri
+- CosIng sorguları için [Playwright](https://playwright.dev/python/) ve en az
+  bir tarayıcı ikilisi (`playwright install chromium` gibi bir komutla
+  yüklenebilir).
 - (Opsiyonel) Görsel sıkıştırma için [`Pillow`](https://python-pillow.org/).
   Kurulmaması durumunda scraper görselleri orijinal biçimleriyle kaydeder.
 - Dış ağ erişimi (gerçek veri toplamak için gereklidir).
@@ -100,6 +106,7 @@ görsellerle birlikte kaydeder.【F:main.py†L96-L118】【F:src/inciscraper/sc
 | --- | --- |
 | `--db PATH` | Kullanılacak SQLite dosyasının yolu (varsayılan `incidecoder.db`). |
 | `--images-dir DIR` | Görsellerin kaydedileceği dizin (varsayılan `images`). |
+| `--log-dir DIR` | Her çalışma için oluşturulan log dosyalarının konumu (varsayılan `logs`). |
 | `--base-url URL` | Gerekirse farklı bir INCIDecoder tabanı kullanın. |
 | `--alternate-base-url URL` | DNS hatalarında denenecek ek taban URL'ler; birden fazla kez verilebilir. |
 | `--step {all,brands,products,details}` | Pipeline'ın belirli bir bölümünü çalıştırır. |
@@ -126,8 +133,7 @@ Scraper aşağıdaki tabloları oluşturur ve kontrol eder:
   alınan CAS/EC numaraları, tanımlanmış diğer maddeler ve düzenleyici
   referanslar gibi veriler, Quick Facts / Show me some proof listeleri ve detay
   bölümünün metni; tümü son kontrol/güncelleme damgalarıyla birlikte saklanır.
-  CosIng fonksiyon kimlikleri ayrıca `ingredient_functions` tablosuna
-  referanslanır.【F:src/inciscraper/scraper.py†L662-L718】【F:src/inciscraper/scraper.py†L1878-L2013】【F:src/inciscraper/scraper.py†L2152-L2238】
+  CosIng fonksiyon kimlikleri ayrıca `functions` tablosuna referanslanır.【F:src/inciscraper/scraper.py†L662-L718】【F:src/inciscraper/scraper.py†L1888-L2244】
 - **frees** – #alcohol-free gibi hashtag tarzı pazarlama iddialarını ve ilgili
   tooltip açıklamalarını saklar; ürünler bu tablodaki kimliklere bağlanır.【F:src/inciscraper/scraper.py†L668-L705】【F:src/inciscraper/scraper.py†L1668-L1708】
 - **metadata** – Kaldığı yerden devam edebilmek için kullanılan yardımcı
