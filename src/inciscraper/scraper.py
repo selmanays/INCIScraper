@@ -1053,10 +1053,14 @@ class INCIScraper:
         detail_tables = {
             "ingredients",
             "functions",
+            # ``ingredient_functions`` is the legacy name for ``functions``;
+            # dropping it should also force a detail refresh so we reload
+            # CosIng function metadata.
+            "ingredient_functions",
         }
         if detail_tables & dropped_tables and products_available:
             LOGGER.info(
-                "Resetting product detail flags after ingredient table rebuild",
+                "Resetting product detail flags after ingredient/function table rebuild",
             )
             self.conn.execute("UPDATE products SET details_scraped = 0")
 
