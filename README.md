@@ -67,6 +67,47 @@ scraper sunar.
   tespit edildiğinde ise ilgili kayıtlar güncellenip `last_updated_at`
   güncellenir.【F:main.py†L100-L168】【F:src/inciscraper/mixins/brands.py†L131-L169】【F:src/inciscraper/mixins/products.py†L231-L336】【F:src/inciscraper/mixins/details.py†L205-L335】
 
+## Web Arayüzü
+
+Depodaki `ui/` dizini, [bundui/shadcn-admin-dashboard-free](https://github.com/bundui/shadcn-admin-dashboard-free)
+projesi temel alınarak kurulmuş Next.js 14 tabanlı CRM panosunu barındırır; Shadcn
+bileşenleri, Tailwind CSS ve Recharts gibi yardımcı kütüphaneler `ui/package.json`
+üzerinden yönetilir.【F:ui/package.json†L1-L48】 Uygulama düzeni `MainLayout`
+bileşeninde toplanır ve kenar çubuğu ile üst bar `Sidebar` ve `Header`
+kompozitleri aracılığıyla render edilir.【F:ui/components/main-layout.tsx†L1-L17】【F:ui/components/layout/sidebar.tsx†L1-L68】【F:ui/components/layout/header.tsx†L1-L71】
+Navigasyon kaynakları `page_routes` yapılandırmasıyla tanımlanır; kök rota ve
+middleware bu yapılandırmayı kullanarak istekleri `/dashboard/crm` görünümüne
+gönderir.【F:ui/lib/routes-config.tsx†L1-L36】【F:ui/app/page.tsx†L1-L5】【F:ui/middleware.ts†L1-L9】
+
+`/dashboard/crm` rotası, hedef göstergesi, metrik kartları, lead kaynağı
+dağılımı, görev listesi, satış hunisi ve lead tablosunu tek sayfada sunar.【F:ui/app/dashboard/crm/page.tsx†L1-L39】
+Bu bileşenlerin her biri statik veri kümelerini kendi dosyalarında tutarak
+panoyu tamamen istemci tarafında çalıştırır: hedef göstergesi için `TargetCard`,
+metrik kartları için `SummaryCards`, lead dağılımı için `LeadBySourceCard`, görevler
+için `RecentTasks`, satış hunisi için `SalesPipelineCard` ve tablo için `LeadsTable`
+modülleri kullanılır.【F:ui/app/dashboard/crm/cards/target-card.tsx†L12-L59】【F:ui/app/dashboard/crm/cards/summary-cards.tsx†L5-L46】【F:ui/app/dashboard/crm/cards/lead-by-source-card.tsx†L14-L78】【F:ui/app/dashboard/crm/cards/recent-tasks.tsx†L18-L93】【F:ui/app/dashboard/crm/cards/sales-pipeline-card.tsx†L1-L66】【F:ui/app/dashboard/crm/cards/leads-table.tsx†L29-L147】
+Global stiller `globals.scss` dosyasıyla yönetilir ve CRM yerleşimi bu temelleri
+`App` katmanından devralır.【F:ui/app/globals.scss†L1-L45】【F:ui/app/layout.tsx†L1-L15】
+
+Görsel varlıklar kod içinde dinamik olarak üretilir: avatarlar isimlerden türetilen
+degrade arka planlar ve baş harflerle render edilir, giriş/kayıt sayfalarındaki
+hero görselleri Tailwind tabanlı gradient paneller olarak sunulur. Favicon da
+`app/icon.tsx` dosyasında `ImageResponse` ile çizildiği için depoda ikili dosya
+barındırmadan şablonun tamamı sunulabilir.【F:ui/lib/utils.ts†L9-L36】【F:ui/app/(guest)/login/page.tsx†L18-L33】【F:ui/app/dashboard/pages/users/data-table.tsx†L1-L62】【F:ui/app/icon.tsx†L1-L32】
+
+### Çalıştırma
+
+```bash
+cd ui
+npm install
+npm run dev
+```
+
+Geliştirme sunucusu varsayılan olarak `http://localhost:3000` adresinde açılır.
+Bu kurulum herhangi bir veritabanı veya API bağlantısı gerektirmez; CRM
+bileşenleri yerleşik veri kümelerini kullanarak hedef göstergesi, özet kartları ve
+lead tablosu gibi içerikleri doğrudan istemcide oluşturur.【F:ui/app/dashboard/crm/cards/target-card.tsx†L12-L59】【F:ui/app/dashboard/crm/cards/summary-cards.tsx†L5-L46】【F:ui/app/dashboard/crm/cards/leads-table.tsx†L29-L147】
+
 ## Gereksinimler
 
 - Python 3.11 veya üzeri
@@ -208,50 +249,6 @@ INCIScraper/
 ├── src/inciscraper/       # Scraper paketinin kaynak kodu
 └── ui/                    # shadcn-ui bileşenleriyle Next.js tabanlı yönetim paneli
 ```
-
-## Web Arayüzü
-
-Scraper veritabanını görsel olarak inceleyip düzenlemek için `ui/` dizininde
-Next.js ve [shadcn/ui](https://ui.shadcn.com/) bileşenleriyle hazırlanmış bir
-kontrol paneli yer alır. Arayüz SQLite veritabanındaki tabloları listeler,
-satırları sayfalı olarak gösterir ve hücreleri doğrudan düzenleyip kaydetmeye
-imkân tanır. Güncellenen pano, shadcn dashboard örneğindeki tüm bileşenleri
-INCIScraper içeriğine uyarlayarak sunar:
-
-- Sol kenar çubuğu marka kimliğini ve tablo listesini gösterir; mobilde açılır
-  menü şeklinde kullanılabilir.
-- Üst başlıkta tablo seçici, verileri yenileme kısayolu ve ışık/koyu tema
-  düğmesi bulunur.
-- "Toplam tablo", "Seçili tablo", "Toplam kayıt" ve "Kolon & değişiklik"
-  kartları özet metrikleri vurgular.
-- Kolon dağılımı grafiği tablo şemasındaki veri türlerini görselleştirir,
-  "Tablo özeti" kartı ise birincil anahtar ve LIMIT/OFFSET gibi meta verileri
-  listeler.
-- Durum uyarıları ve düzenlenebilir tablo görünümü dark/light temalarla uyumlu
-  olacak şekilde yeniden tasarlanmıştır.
-
-### Kurulum ve Çalıştırma
-
-```bash
-cd ui
-npm install
-npm run dev
-```
-
-Varsayılan olarak arayüz depo kökündeki `data/incidecoder.db` dosyasına bağlanır.
-Farklı bir veritabanı kullanmak için `DATABASE_PATH` ortam değişkenini
-tanımlayabilirsiniz:
-
-```bash
-DATABASE_PATH=/path/to/your.db npm run dev
-```
-
-Sunucu varsayılan olarak `http://localhost:3000` adresinde çalışır. Tarayıcıda
-tablo seçici üzerinden veri tabanındaki tablolar arasında geçiş yapabilir,
-hücreleri düzenledikten sonra **Kaydet** düğmesiyle toplu olarak
-güncelleyebilirsiniz. Birincil anahtar sütunları koruma amacıyla yalnızca
-okunur olarak gelir; diğer alanlar düzenlenebilir. Sorgular satır sayfa boyutu
-ve sayfa numarasına göre sınırlanır.
 
 ## Geliştirme İpuçları
 
