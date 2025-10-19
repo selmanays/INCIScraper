@@ -67,6 +67,34 @@ scraper sunar.
   tespit edildiğinde ise ilgili kayıtlar güncellenip `last_updated_at`
   güncellenir.【F:main.py†L100-L168】【F:src/inciscraper/mixins/brands.py†L131-L169】【F:src/inciscraper/mixins/products.py†L231-L336】【F:src/inciscraper/mixins/details.py†L205-L335】
 
+## Web Arayüzü
+
+`ui/` dizini, [bundui/shadcn-admin-dashboard-free](https://github.com/bundui/shadcn-admin-dashboard-free)
+deposunun Next.js 14 tabanlı CRM şablonunun birebir kopyasını barındırır. Bu
+kurulum Shadcn bileşenleri, Tailwind CSS, Recharts ve Faker gibi yardımcı
+bağımlılıklarla birlikte gelir ve şablonun varsayılan sayfaları, veri kümeleri
+ve varlıklarını değiştirmeden çalışır durumda bırakır.【F:ui/package.json†L1-L96】【F:ui/scripts/fetch-assets.mjs†L1-L55】 Şablona
+ilişkin ayrıntılı açıklamalar ve ekran görüntüleri için `ui/README.md` dosyasına
+başvurabilirsiniz.【F:ui/README.md†L1-L58】
+
+### Çalıştırma
+
+```bash
+cd ui
+npm install
+npm run dev
+```
+
+Geliştirme sunucusu varsayılan olarak `http://localhost:3000` adresinde çalışır
+ve temanın örnek CRM sayfalarını hazır veri kümeleriyle sunar. Şablon, herhangi
+bir veritabanı veya harici API bağlantısı gerektirmez; tüm içerik `app/`
+altındaki statik modüller tarafından sağlanır.【F:ui/app/page.tsx†L1-L15】【F:ui/app/dashboard/default/page.tsx†L1-L139】
+
+Kurulum sırasında `npm install` komutu, şablonun favicon ve görsel dosyalarını
+upstream depodan indirerek `public/` dizinine yerleştirir; depo bu varlıkları
+`.gitignore` aracılığıyla izlemeyerek ikili dosyaların PR oluşturma sürecini
+engellemesini önler.【F:ui/scripts/fetch-assets.mjs†L1-L55】【F:ui/.gitignore†L26-L33】
+
 ## Gereksinimler
 
 - Python 3.11 veya üzeri
@@ -208,50 +236,6 @@ INCIScraper/
 ├── src/inciscraper/       # Scraper paketinin kaynak kodu
 └── ui/                    # shadcn-ui bileşenleriyle Next.js tabanlı yönetim paneli
 ```
-
-## Web Arayüzü
-
-Scraper veritabanını görsel olarak inceleyip düzenlemek için `ui/` dizininde
-Next.js ve [shadcn/ui](https://ui.shadcn.com/) bileşenleriyle hazırlanmış bir
-kontrol paneli yer alır. Arayüz SQLite veritabanındaki tabloları listeler,
-satırları sayfalı olarak gösterir ve hücreleri doğrudan düzenleyip kaydetmeye
-imkân tanır. Güncellenen pano, shadcn dashboard örneğindeki tüm bileşenleri
-INCIScraper içeriğine uyarlayarak sunar:
-
-- Sol kenar çubuğu marka kimliğini ve tablo listesini gösterir; mobilde açılır
-  menü şeklinde kullanılabilir.
-- Üst başlıkta tablo seçici, verileri yenileme kısayolu ve ışık/koyu tema
-  düğmesi bulunur.
-- "Toplam tablo", "Seçili tablo", "Toplam kayıt" ve "Kolon & değişiklik"
-  kartları özet metrikleri vurgular.
-- Kolon dağılımı grafiği tablo şemasındaki veri türlerini görselleştirir,
-  "Tablo özeti" kartı ise birincil anahtar ve LIMIT/OFFSET gibi meta verileri
-  listeler.
-- Durum uyarıları ve düzenlenebilir tablo görünümü dark/light temalarla uyumlu
-  olacak şekilde yeniden tasarlanmıştır.
-
-### Kurulum ve Çalıştırma
-
-```bash
-cd ui
-npm install
-npm run dev
-```
-
-Varsayılan olarak arayüz depo kökündeki `data/incidecoder.db` dosyasına bağlanır.
-Farklı bir veritabanı kullanmak için `DATABASE_PATH` ortam değişkenini
-tanımlayabilirsiniz:
-
-```bash
-DATABASE_PATH=/path/to/your.db npm run dev
-```
-
-Sunucu varsayılan olarak `http://localhost:3000` adresinde çalışır. Tarayıcıda
-tablo seçici üzerinden veri tabanındaki tablolar arasında geçiş yapabilir,
-hücreleri düzenledikten sonra **Kaydet** düğmesiyle toplu olarak
-güncelleyebilirsiniz. Birincil anahtar sütunları koruma amacıyla yalnızca
-okunur olarak gelir; diğer alanlar düzenlenebilir. Sorgular satır sayfa boyutu
-ve sayfa numarasına göre sınırlanır.
 
 ## Geliştirme İpuçları
 
