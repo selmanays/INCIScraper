@@ -63,8 +63,6 @@ EXPECTED_SCHEMA: Dict[str, Set[str]] = {
     "functions": {
         "id",
         "name",
-        "url",
-        "description",
     },
     "frees": {
         "id",

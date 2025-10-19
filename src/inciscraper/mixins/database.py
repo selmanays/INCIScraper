@@ -72,9 +72,7 @@ class DatabaseMixin:
 
             CREATE TABLE IF NOT EXISTS functions (
                 id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                url TEXT UNIQUE,
-                description TEXT
+                name TEXT NOT NULL
             );
 
             CREATE TABLE IF NOT EXISTS frees (
@@ -101,7 +99,7 @@ class DatabaseMixin:
         )
         self.conn.commit()
         self._ensure_ingredient_details_capacity()
-        self._ensure_functions_allow_null_urls()
+        self._ensure_functions_minimal_schema()
 
     # ------------------------------------------------------------------
     # Metadata helpers
@@ -231,33 +229,26 @@ class DatabaseMixin:
         self.conn.execute("DROP TABLE ingredients_backup")
         self.conn.commit()
 
-    def _ensure_functions_allow_null_urls(self) -> None:
-        """Rebuild the functions table if ``url`` is incorrectly NOT NULL."""
+    def _ensure_functions_minimal_schema(self) -> None:
+        """Ensure the functions table only contains the identifier and name columns."""
 
         cursor = self.conn.execute("PRAGMA table_info(functions)")
         rows = cursor.fetchall()
-        url_row = None
-        for row in rows:
-            if row["name"] == "url":
-                url_row = row
-                break
-        if not url_row or not url_row["notnull"]:
+        if not rows:
             return
-        LOGGER.info(
-            "Rebuilding functions table to allow NULL url entries",
-        )
+        column_names = [row["name"] for row in rows]
+        if set(column_names) == {"id", "name"} and len(column_names) == 2:
+            return
+        LOGGER.info("Rebuilding functions table to drop legacy columns")
         self.conn.execute("ALTER TABLE functions RENAME TO functions_backup")
         self.conn.executescript(
             """
             CREATE TABLE functions (
                 id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                url TEXT UNIQUE,
-                description TEXT
+                name TEXT NOT NULL
             );
-            INSERT INTO functions (id, name, url, description)
-            SELECT id, name, NULLIF(TRIM(url), ''), description
-            FROM functions_backup;
+            INSERT OR IGNORE INTO functions (id, name)
+            SELECT id, name FROM functions_backup;
             DROP TABLE functions_backup;
             """
         )
@@ -305,6 +296,12 @@ class DatabaseMixin:
                 actual_columns.update(missing_columns)
             extra_columns = actual_columns - expected_columns
             if extra_columns:
+                if table == "functions":
+                    LOGGER.info(
+                        "Deferring functions table rebuild to drop legacy columns (found: %s)",
+                        sorted(actual_columns),
+                    )
+                    continue
                 LOGGER.info(
                     "Recreating table %s due to unexpected columns (expected: %s, found: %s)",
                     table,

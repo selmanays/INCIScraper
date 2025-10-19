@@ -38,8 +38,8 @@ class INCIScraper(
     def __init__(
         self,
         *,
-        db_path: str = "incidecoder.db",
-        image_dir: str | os.PathLike[str] = "images",
+        db_path: str = "data/incidecoder.db",
+        image_dir: str | os.PathLike[str] = "data/images",
         base_url: str = BASE_URL,
         request_timeout: int = DEFAULT_TIMEOUT,
         alternate_base_urls: Optional[Iterable[str]] = None,
@@ -48,7 +48,9 @@ class INCIScraper(
         self.timeout = request_timeout
         self.image_dir = Path(image_dir)
         self.image_dir.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
+        db_path_obj = Path(db_path)
+        db_path_obj.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(db_path_obj)
         self.conn.row_factory = sqlite3.Row
         self._host_failover: dict[str, str] = {}
         self._host_ip_overrides: dict[str, str] = {}

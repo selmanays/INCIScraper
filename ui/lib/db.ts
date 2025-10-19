@@ -4,7 +4,7 @@ import fs from "fs";
 
 let cachedDb: Database.Database | null = null;
 
-const defaultPath = path.resolve(process.cwd(), "../incidecoder.db");
+const defaultPath = path.resolve(process.cwd(), "../data/incidecoder.db");
 
 function resolveDatabasePath(): string {
   const envPath = process.env.DATABASE_PATH;
@@ -21,6 +21,10 @@ declare global {
 
 function createDatabase(): Database.Database {
   const dbPath = resolveDatabasePath();
+  const parentDir = path.dirname(dbPath);
+  if (!fs.existsSync(parentDir)) {
+    fs.mkdirSync(parentDir, { recursive: true });
+  }
   if (!fs.existsSync(dbPath)) {
     fs.writeFileSync(dbPath, "");
   }

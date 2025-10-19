@@ -86,7 +86,7 @@ class IngredientDetails:
     name: str
     url: str
     rating_tag: str
-    also_called: str
+    also_called: List[str]
     irritancy: str
     comedogenicity: str
     details_text: str
@@ -104,6 +104,6 @@ class IngredientFunctionInfo:
     """Describes a single cosmetic function entry."""
 
     name: str
-    url: Optional[str]
-    description: str
+    url: Optional[str] = None
+    description: str = ""
 
