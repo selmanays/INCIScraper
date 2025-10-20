@@ -14,6 +14,15 @@ INGREDIENT_FETCH_ATTEMPTS = 6
 INGREDIENT_PLACEHOLDER_MARKER = "__INCISCRAPER_PLACEHOLDER__"
 PROGRESS_LOG_INTERVAL = 10
 
+# Performance optimization constants
+DEFAULT_MAX_WORKERS = 5
+DEFAULT_BATCH_SIZE = 50
+DEFAULT_IMAGE_WORKERS = 3
+MIN_RATE_LIMIT = 0.1  # minimum delay between requests (seconds)
+MAX_RATE_LIMIT = 2.0  # maximum delay between requests (seconds)
+ADAPTIVE_RATE_FACTOR = 1.5  # factor to adjust rate limiting
+CACHE_SIZE_LIMIT = 10000  # maximum number of items in memory cache
+
 
 EXPECTED_SCHEMA: Dict[str, Set[str]] = {
     "brands": {

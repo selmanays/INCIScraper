@@ -10,16 +10,18 @@ import ssl
 from pathlib import Path
 from typing import Iterable, Optional
 
-from .constants import BASE_URL, DEFAULT_TIMEOUT
+from .constants import BASE_URL, DEFAULT_TIMEOUT, DEFAULT_MAX_WORKERS, DEFAULT_BATCH_SIZE, DEFAULT_IMAGE_WORKERS
 from .mixins import (
     BrandScraperMixin,
     DatabaseMixin,
     DetailScraperMixin,
+    MonitoringMixin,
     NetworkMixin,
     ProductScraperMixin,
     UtilityMixin,
     WorkloadMixin,
 )
+from .mixins.details import LRUCache
 
 LOGGER = logging.getLogger(__name__)
 
@@ -32,6 +34,7 @@ class INCIScraper(
     BrandScraperMixin,
     DatabaseMixin,
     WorkloadMixin,
+    MonitoringMixin,
 ):
     """Main entry point that orchestrates all scraping steps."""
 
@@ -43,15 +46,24 @@ class INCIScraper(
         base_url: str = BASE_URL,
         request_timeout: int = DEFAULT_TIMEOUT,
         alternate_base_urls: Optional[Iterable[str]] = None,
+        max_workers: int = DEFAULT_MAX_WORKERS,
+        batch_size: int = DEFAULT_BATCH_SIZE,
+        image_workers: int = DEFAULT_IMAGE_WORKERS,
+        skip_images: bool = False,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout = request_timeout
+        self.max_workers = max_workers
+        self.batch_size = batch_size
+        self.image_workers = image_workers
+        self.skip_images = skip_images
         self.image_dir = Path(image_dir)
         self.image_dir.mkdir(parents=True, exist_ok=True)
         db_path_obj = Path(db_path)
         db_path_obj.parent.mkdir(parents=True, exist_ok=True)
         self.conn = sqlite3.connect(db_path_obj)
         self.conn.row_factory = sqlite3.Row
+        self.db_path = str(db_path_obj)
         self._host_failover: dict[str, str] = {}
         self._host_ip_overrides: dict[str, str] = {}
         self._host_alternatives = self._build_host_alternatives(
@@ -63,8 +75,18 @@ class INCIScraper(
         self._cosing_context = None
         self._cosing_page = None
         self._cosing_playwright_failed = False
-        self._cosing_record_cache: dict[str, "CosIngRecord"] = {}
+        self._cosing_record_cache = LRUCache()
+        
+        # Initialize monitoring
+        super().__init__()
+        
+        # Initialize rate limiting
+        self._init_rate_limiting()
+        
         self._init_db()
+        
+        # Load CosIng cache from SQLite
+        self._load_cosing_cache_from_db()
 
     # ------------------------------------------------------------------
     # Public API
@@ -73,11 +95,19 @@ class INCIScraper(
         """Execute the full scraping pipeline."""
 
         LOGGER.info("Starting brand collection")
+        self.start_timer("brand_collection")
         self.scrape_brands()
+        self.end_timer("brand_collection")
+        
         LOGGER.info("Starting product collection")
+        self.start_timer("product_collection")
         self.scrape_products()
+        self.end_timer("product_collection")
+        
         LOGGER.info("Starting product detail collection")
+        self.start_timer("product_detail_collection")
         self.scrape_product_details()
+        self.end_timer("product_detail_collection")
 
     def generate_sample_dataset(
         self,
@@ -144,6 +174,8 @@ class INCIScraper(
         """Close the underlying SQLite connection and release Playwright resources."""
 
         self._shutdown_cosing_resources()
+        self.close_all_progress_bars()
+        self.log_performance_summary()
         self.conn.close()
 
     # ------------------------------------------------------------------
