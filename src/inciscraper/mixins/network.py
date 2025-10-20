@@ -9,6 +9,7 @@ import os
 import socket
 import ssl
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import BytesIO
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -23,7 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency safeguard
 
 _PILLOW_WARNING_EMITTED = False
 
-from ..constants import USER_AGENT
+from ..constants import USER_AGENT, MIN_RATE_LIMIT, MAX_RATE_LIMIT, ADAPTIVE_RATE_FACTOR
 
 LOGGER = logging.getLogger(__name__)
 
@@ -33,10 +34,51 @@ class NetworkMixin:
 
     timeout: int
     image_dir: Path
+    image_workers: int
     _host_failover: Dict[str, str]
     _host_ip_overrides: Dict[str, str]
     _host_alternatives: Dict[str, List[str]]
     _ssl_context: ssl.SSLContext
+    _current_rate_limit: float
+    _last_request_time: float
+    _consecutive_successes: int
+    _consecutive_failures: int
+
+    def _init_rate_limiting(self) -> None:
+        """Initialize adaptive rate limiting state."""
+        self._current_rate_limit = MIN_RATE_LIMIT
+        self._last_request_time = 0.0
+        self._consecutive_successes = 0
+        self._consecutive_failures = 0
+
+    def _apply_rate_limit(self) -> None:
+        """Apply adaptive rate limiting between requests."""
+        current_time = time.time()
+        time_since_last = current_time - self._last_request_time
+        
+        if time_since_last < self._current_rate_limit:
+            sleep_time = self._current_rate_limit - time_since_last
+            time.sleep(sleep_time)
+        
+        self._last_request_time = time.time()
+
+    def _update_rate_limit_on_success(self) -> None:
+        """Update rate limiting after a successful request."""
+        self._consecutive_successes += 1
+        self._consecutive_failures = 0
+        
+        # Reduce rate limit after consecutive successes
+        if self._consecutive_successes >= 5:
+            self._current_rate_limit = max(MIN_RATE_LIMIT, self._current_rate_limit / ADAPTIVE_RATE_FACTOR)
+            self._consecutive_successes = 0
+
+    def _update_rate_limit_on_failure(self) -> None:
+        """Update rate limiting after a failed request."""
+        self._consecutive_failures += 1
+        self._consecutive_successes = 0
+        
+        # Increase rate limit after failures
+        self._current_rate_limit = min(MAX_RATE_LIMIT, self._current_rate_limit * ADAPTIVE_RATE_FACTOR)
 
     def _fetch_html(self, url: str, *, attempts: int = 3) -> Optional[str]:
         """Download ``url`` and return the HTML body as text."""
@@ -55,6 +97,7 @@ class NetworkMixin:
         current_url = url
         for attempt in range(1, attempts + 1):
             try:
+                self._apply_rate_limit()
                 request_url = self._apply_host_override(current_url)
                 req = request.Request(request_url, headers={"User-Agent": USER_AGENT})
                 with request.urlopen(req, timeout=self.timeout) as response:
@@ -71,6 +114,7 @@ class NetworkMixin:
                     final_host = parse.urlsplit(response.geturl()).hostname
                     if original_host and final_host and original_host != final_host:
                         self._host_failover[original_host] = final_host
+                    self._update_rate_limit_on_success()
                     return data
             except (error.URLError, error.HTTPError, socket.timeout) as exc:
                 delay = min(2 ** attempt, 10)
@@ -104,6 +148,7 @@ class NetworkMixin:
                                 return data
                 if attempt == attempts:
                     LOGGER.error("Failed to download %s: %s", current_url, exc)
+                    self._update_rate_limit_on_failure()
                     return None
                 LOGGER.warning(
                     "Attempt %s to download %s failed (%s) – retrying",
@@ -416,6 +461,79 @@ class NetworkMixin:
         parsed = parse.urlparse(url)
         _, ext = os.path.splitext(parsed.path)
         return ext if ext else ".jpg"
+
+    def download_images_parallel(
+        self,
+        image_tasks: List[Tuple[str, str, str, Optional[str]]],
+        *,
+        skip_images: bool = False,
+    ) -> List[Optional[str]]:
+        """Download and process multiple images in parallel.
+        
+        Args:
+            image_tasks: List of (image_url, product_name, product_id, existing_path) tuples
+            skip_images: If True, skip image downloading entirely
+            
+        Returns:
+            List of image paths (or None if skipped/failed)
+        """
+        
+        if skip_images or self.image_workers <= 1:
+            # Sequential processing for single worker or when skipping
+            results = []
+            for image_url, product_name, product_id, existing_path in image_tasks:
+                if skip_images:
+                    results.append(None)
+                else:
+                    result = self._download_product_image_parallel(image_url, product_name, product_id)
+                    results.append(result)
+            return results
+        
+        # Parallel processing for multiple workers
+        results = [None] * len(image_tasks)
+        
+        with ThreadPoolExecutor(max_workers=self.image_workers) as executor:
+            # Submit all image download tasks
+            future_to_index = {}
+            for i, (image_url, product_name, product_id, existing_path) in enumerate(image_tasks):
+                if image_url:  # Only process if there's an image URL
+                    future = executor.submit(
+                        self._download_product_image_parallel,
+                        image_url,
+                        product_name,
+                        product_id
+                    )
+                    future_to_index[future] = i
+            
+            # Process completed tasks as they finish
+            for future in as_completed(future_to_index):
+                index = future_to_index[future]
+                try:
+                    result = future.result()
+                    results[index] = result
+                except Exception as exc:
+                    LOGGER.error("Image download task failed for index %d: %s", index, exc)
+        
+        return results
+
+    def _download_product_image_parallel(
+        self,
+        image_url: Optional[str],
+        product_name: str,
+        product_id: str,
+    ) -> Optional[str]:
+        """Thread-safe version of _download_product_image for parallel execution."""
+        
+        if not image_url:
+            return None
+        
+        try:
+            # Use the existing _download_product_image method which is already thread-safe
+            return self._download_product_image(image_url, product_name, product_id)
+            
+        except Exception as exc:
+            LOGGER.error("Failed to download image for product %s: %s", product_id, exc)
+            return None
 
 
 class _DirectHTTPSConnection(http.client.HTTPSConnection):
