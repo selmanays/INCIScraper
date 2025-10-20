@@ -1,56 +1,83 @@
-"""Database and metadata helpers shared by the scraper implementation."""
-
+"""Database operations mixin for INCIScraper."""
 from __future__ import annotations
 
-import logging
+import json
 import sqlite3
-from typing import Dict, Optional, Set
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-from ..constants import ADDITIONAL_COLUMN_DEFINITIONS, EXPECTED_SCHEMA
+from inciscraper.constants import PROGRESS_LOG_INTERVAL
+from inciscraper.mixins.monitoring import MonitoringMixin
 
 LOGGER = logging.getLogger(__name__)
 
 
-class DatabaseMixin:
-    """Utility mixin exposing schema and metadata helpers."""
+class DatabaseMixin(MonitoringMixin):
+    """Mixin for database operations and metadata management."""
 
-    conn: sqlite3.Connection
-    db_path: str
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.db_path = kwargs.get('db_path')
+        self.conn = None
 
     def _init_db(self) -> None:
-        """Create required tables and ensure the schema is up to date."""
+        """Initialize the SQLite database with required tables."""
+        
+        db_path_obj = Path(self.db_path)
+        db_path_obj.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Use check_same_thread=False for thread safety
+        self.conn = sqlite3.connect(str(db_path_obj), check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        
+        # Enable WAL mode for better concurrency
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        
+        # Create tables
+        self._create_tables()
+        self._ensure_minimal_schema()
 
-        cursor = self.conn.cursor()
-        self._enforce_schema()
-        cursor.executescript(
+    def _create_tables(self) -> None:
+        """Create all required database tables."""
+        
+        # Brands table
+        self.conn.execute(
             """
             CREATE TABLE IF NOT EXISTS brands (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
                 url TEXT NOT NULL UNIQUE,
-                products_scraped INTEGER NOT NULL DEFAULT 0,
+                products_scraped INTEGER DEFAULT 0,
                 last_checked_at TEXT,
                 last_updated_at TEXT
-            );
-
+            )
+            """
+        )
+        
+        # Products table
+        self.conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS products (
                 id TEXT PRIMARY KEY,
-                brand_id TEXT NOT NULL REFERENCES brands(id),
+                brand_id TEXT NOT NULL,
                 name TEXT NOT NULL,
                 url TEXT NOT NULL UNIQUE,
-                description TEXT,
                 image_path TEXT,
-                ingredient_ids_json TEXT,
-                key_ingredient_ids_json TEXT,
-                other_ingredient_ids_json TEXT,
-                free_tag_ids_json TEXT,
-                discontinued INTEGER NOT NULL DEFAULT 0,
+                description TEXT,
+                discontinued INTEGER DEFAULT 0,
                 replacement_product_url TEXT,
-                details_scraped INTEGER NOT NULL DEFAULT 0,
+                ingredient_ids_json TEXT,
+                details_scraped INTEGER DEFAULT 0,
                 last_checked_at TEXT,
-                last_updated_at TEXT
-            );
-
+                last_updated_at TEXT,
+                FOREIGN KEY (brand_id) REFERENCES brands (id)
+            )
+            """
+        )
+        
+        # Ingredients table
+        self.conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS ingredients (
                 id TEXT PRIMARY KEY,
                 name TEXT NOT NULL,
@@ -60,7 +87,7 @@ class DatabaseMixin:
                 cosing_function_ids_json TEXT,
                 irritancy TEXT,
                 comedogenicity TEXT,
-                details_text LONGTEXT,
+                details_text TEXT,
                 cosing_cas_numbers_json TEXT,
                 cosing_ec_numbers_json TEXT,
                 cosing_identified_ingredients_json TEXT,
@@ -69,114 +96,58 @@ class DatabaseMixin:
                 proof_references_json TEXT,
                 last_checked_at TEXT,
                 last_updated_at TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS functions (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS frees (
-                id TEXT PRIMARY KEY,
-                tag TEXT NOT NULL UNIQUE,
-                tooltip TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS metadata (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            );
-
-            CREATE TABLE IF NOT EXISTS cosing_cache (
-                lookup_key TEXT PRIMARY KEY,
-                detail_html TEXT,
-                source_term TEXT,
-                last_updated_at TEXT NOT NULL
-            );
+            )
             """
         )
-        cursor.execute(
-            "CREATE INDEX IF NOT EXISTS idx_cosing_cache_source_term ON cosing_cache(source_term)"
+        
+        # Functions table
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS functions (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL UNIQUE,
+                last_updated_at TEXT
+            )
+            """
         )
+        
+        # Product highlights table
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS product_highlights (
+                id TEXT PRIMARY KEY,
+                product_id TEXT NOT NULL,
+                highlight_text TEXT NOT NULL,
+                last_updated_at TEXT,
+                FOREIGN KEY (product_id) REFERENCES products (id)
+            )
+            """
+        )
+        
+        # Metadata table
+        self.conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS metadata (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        
         self.conn.commit()
-        self._ensure_ingredient_details_capacity()
+
+    def _ensure_minimal_schema(self) -> None:
+        """Ensure minimal schema requirements are met."""
+        
+        # Ensure ingredients table has LONGTEXT for details_text
+        self._ensure_ingredients_minimal_schema()
+        
+        # Ensure functions table exists
         self._ensure_functions_minimal_schema()
 
-    # ------------------------------------------------------------------
-    # Metadata helpers
-    # ------------------------------------------------------------------
-    def _get_metadata(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        """Return metadata for ``key`` or ``default`` when not stored."""
-
-        row = self.conn.execute(
-            "SELECT value FROM metadata WHERE key = ?",
-            (key,),
-        ).fetchone()
-        if row is None:
-            return default
-        return row["value"]
-
-    def _set_metadata(self, key: str, value: str) -> None:
-        """Persist a metadata value."""
-
-        self.conn.execute(
-            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
-            (key, value),
-        )
-        self.conn.commit()
-
-    def _delete_metadata(self, key: str) -> None:
-        """Remove ``key`` from the metadata table if it exists."""
-
-        self.conn.execute("DELETE FROM metadata WHERE key = ?", (key,))
-        self.conn.commit()
-
-    def _count_metadata_with_prefix(self, prefix: str) -> int:
-        """Count how many metadata keys share ``prefix``."""
-
-        row = self.conn.execute(
-            "SELECT COUNT(*) FROM metadata WHERE key LIKE ?",
-            (f"{prefix}%",),
-        ).fetchone()
-        return int(row[0]) if row else 0
-
-    def _metadata_has_incomplete_brands(self) -> bool:
-        """Return ``True`` when brand scraping metadata signals pending work."""
-
-        if self._get_metadata("brands_complete") == "0":
-            return True
-        next_offset = self._get_metadata("brands_next_offset")
-        if next_offset and next_offset not in {"", "1"}:
-            return True
-        return False
-
-    def _reset_brand_completion_flags_if_products_empty(self) -> None:
-        """Reset brand completion flags when the products table has been cleared."""
-
-        completed_brands = self.conn.execute(
-            "SELECT COUNT(*) FROM brands WHERE products_scraped = 1",
-        ).fetchone()[0]
-        if completed_brands == 0:
-            return
-        total_products = self.conn.execute("SELECT COUNT(*) FROM products").fetchone()[0]
-        if total_products > 0:
-            return
-        LOGGER.info(
-            "Products table is empty but %s brand(s) marked complete – resetting state",
-            completed_brands,
-        )
-        self.conn.execute("UPDATE brands SET products_scraped = 0")
-        self.conn.execute(
-            "DELETE FROM metadata WHERE key LIKE 'brand_products_next_offset:%'",
-        )
-        self.conn.execute(
-            "DELETE FROM metadata WHERE key LIKE 'brand_empty_products:%'",
-        )
-        self.conn.commit()
-
-    def _ensure_ingredient_details_capacity(self) -> None:
-        """Ensure the ingredient details column can store lengthy text values."""
-
+    def _ensure_ingredients_minimal_schema(self) -> None:
+        """Ensure ingredients table can store large text content."""
+        
         cursor = self.conn.execute("PRAGMA table_info(ingredients)")
         rows = cursor.fetchall()
         target_row = None
@@ -231,280 +202,204 @@ class DatabaseMixin:
         self.conn.commit()
 
     def _ensure_functions_minimal_schema(self) -> None:
-        """Ensure the functions table only contains the identifier and name columns."""
+        """Ensure functions table exists with minimal schema."""
+        
+        # Check if functions table exists
+        cursor = self.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='functions'"
+        )
+        if cursor.fetchone() is None:
+            LOGGER.info("Creating functions table")
+            self.conn.execute(
+                """
+                CREATE TABLE functions (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL UNIQUE,
+                    last_updated_at TEXT
+                )
+                """
+            )
+            self.conn.commit()
 
-        cursor = self.conn.execute("PRAGMA table_info(functions)")
-        rows = cursor.fetchall()
-        if not rows:
-            return
-        column_names = [row["name"] for row in rows]
-        if set(column_names) == {"id", "name"} and len(column_names) == 2:
-            return
-        LOGGER.info("Rebuilding functions table to drop legacy columns")
-        self.conn.execute("ALTER TABLE functions RENAME TO functions_backup")
-        self.conn.executescript(
-            """
-            CREATE TABLE functions (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL
-            );
-            INSERT OR IGNORE INTO functions (id, name)
-            SELECT id, name FROM functions_backup;
-            DROP TABLE functions_backup;
-            """
+    # ------------------------------------------------------------------
+    # Metadata helpers
+    # ------------------------------------------------------------------
+    def _get_metadata(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Return metadata for ``key`` or ``default`` when not stored."""
+
+        row = self.conn.execute(
+            "SELECT value FROM metadata WHERE key = ?",
+            (key,),
+        ).fetchone()
+        if row is None:
+            return default
+        return row["value"]
+
+    def _set_metadata(self, key: str, value: str) -> None:
+        """Persist a metadata value."""
+
+        self.conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+            (key, value),
         )
         self.conn.commit()
 
-    def _enforce_schema(self) -> None:
-        """Ensure only expected tables and columns exist in the database."""
+    def _get_metadata_thread_safe(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Return metadata for ``key`` or ``default`` when not stored (thread-safe)."""
+        
+        conn = self._get_thread_safe_connection()
+        try:
+            row = conn.execute(
+                "SELECT value FROM metadata WHERE key = ?",
+                (key,),
+            ).fetchone()
+            if row is None:
+                return default
+            return row["value"]
+        finally:
+            conn.close()
 
-        cursor = self.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        existing_tables = {row["name"] for row in cursor.fetchall()}
-        dropped_tables: Set[str] = set()
-        for table in existing_tables:
-            if table.startswith("sqlite_"):
-                continue
-            if table not in EXPECTED_SCHEMA:
-                LOGGER.info("Dropping unexpected table: %s", table)
-                self.conn.execute(f"DROP TABLE IF EXISTS {table}")
-                dropped_tables.add(table)
-        for table, expected_columns in EXPECTED_SCHEMA.items():
-            cursor = self.conn.execute(f"PRAGMA table_info({table})")
-            rows = cursor.fetchall()
-            if not rows:
-                continue
-            actual_columns = {row["name"] for row in rows}
-            missing_columns = expected_columns - actual_columns
-            recreate_table = False
-            if missing_columns:
-                definitions = ADDITIONAL_COLUMN_DEFINITIONS.get(table, {})
-                for column in sorted(missing_columns):
-                    definition = definitions.get(column)
-                    if not definition:
-                        recreate_table = True
-                        break
-                    LOGGER.info("Adding missing column %s.%s", table, column)
-                    self.conn.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
-                if recreate_table:
-                    LOGGER.info(
-                        "Recreating table %s due to missing columns without definitions (%s)",
-                        table,
-                        sorted(missing_columns),
-                    )
-                    self.conn.execute(f"DROP TABLE IF EXISTS {table}")
-                    dropped_tables.add(table)
-                    continue
-                actual_columns.update(missing_columns)
-            extra_columns = actual_columns - expected_columns
-            if extra_columns:
-                if table == "functions":
-                    LOGGER.info(
-                        "Deferring functions table rebuild to drop legacy columns (found: %s)",
-                        sorted(actual_columns),
-                    )
-                    continue
-                LOGGER.info(
-                    "Recreating table %s due to unexpected columns (expected: %s, found: %s)",
-                    table,
-                    sorted(expected_columns),
-                    sorted(actual_columns),
-                )
-                self.conn.execute(f"DROP TABLE IF EXISTS {table}")
-                dropped_tables.add(table)
+    def _set_metadata_thread_safe(self, key: str, value: str) -> None:
+        """Persist a metadata value (thread-safe)."""
+        
+        conn = self._get_thread_safe_connection()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
+                (key, value),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def _delete_metadata(self, key: str) -> None:
+        """Remove ``key`` from the metadata table if it exists."""
+
+        self.conn.execute("DELETE FROM metadata WHERE key = ?", (key,))
         self.conn.commit()
-        if dropped_tables:
-            cursor = self.conn.execute(
-                "SELECT name FROM sqlite_master WHERE type='table'",
-            )
-            remaining_tables = {row["name"] for row in cursor.fetchall()}
-            self._reset_progress_after_schema_changes(dropped_tables, remaining_tables)
 
-    def _reset_progress_after_schema_changes(
-        self, dropped_tables: Set[str], remaining_tables: Set[str]
-    ) -> None:
-        """Update metadata when tables were rebuilt during schema enforcement."""
-
-        metadata_available = "metadata" in remaining_tables
-        brands_available = "brands" in remaining_tables
-        products_available = "products" in remaining_tables
-
-        if "products" in dropped_tables:
-            if brands_available:
-                LOGGER.info(
-                    "Resetting products_scraped flags after products table rebuild",
-                )
-                self.conn.execute("UPDATE brands SET products_scraped = 0")
-            if metadata_available:
-                LOGGER.info(
-                    "Clearing product progress metadata after products table rebuild",
-                )
-                self.conn.execute(
-                    "DELETE FROM metadata WHERE key LIKE 'brand_products_next_offset:%'",
-                )
-                self.conn.execute(
-                    "DELETE FROM metadata WHERE key LIKE 'brand_empty_products:%'",
-                )
-
-        detail_tables = {
-            "ingredients",
-            "functions",
-            "ingredient_functions",
-        }
-        if detail_tables & dropped_tables and products_available:
-            LOGGER.info(
-                "Resetting product detail flags after ingredient table rebuild",
-            )
-            self.conn.execute("UPDATE products SET details_scraped = 0")
-
-        if dropped_tables:
-            self.conn.commit()
-
+    # ------------------------------------------------------------------
+    # Thread-safe connection helper
+    # ------------------------------------------------------------------
     def _get_thread_safe_connection(self) -> sqlite3.Connection:
         """Create a new thread-safe SQLite connection."""
-        conn = sqlite3.connect(self.db_path)
+        
+        db_path_obj = Path(self.db_path)
+        conn = sqlite3.connect(str(db_path_obj), check_same_thread=False)
         conn.row_factory = sqlite3.Row
+        
+        # Enable WAL mode for better concurrency
+        conn.execute("PRAGMA journal_mode=WAL")
+        
         return conn
 
     # ------------------------------------------------------------------
-    # Batch processing methods
+    # Batch operations
     # ------------------------------------------------------------------
-    
-    def batch_insert_brands(self, brands_data: list) -> None:
-        """Insert multiple brands in a single transaction."""
+    def batch_insert_brands(self, brands: List[Tuple]) -> None:
+        """Batch insert brands using executemany."""
         
-        if not brands_data:
-            return
-            
-        try:
-            self.conn.executemany(
-                """INSERT OR REPLACE INTO brands 
-                   (id, name, url, products_scraped, last_checked_at, last_updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
-                brands_data
-            )
-            self.conn.commit()
-            LOGGER.debug("Batch inserted %d brands", len(brands_data))
-        except sqlite3.Error as exc:
-            LOGGER.error("Failed to batch insert brands: %s", exc)
-            self.conn.rollback()
-            raise
+        self.conn.executemany(
+            """
+            INSERT OR IGNORE INTO brands (id, name, url, last_checked_at, last_updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            brands
+        )
+        self.conn.commit()
 
-    def batch_insert_products(self, products_data: list) -> None:
-        """Insert multiple products in a single transaction."""
+    def batch_insert_products(self, products: List[Tuple]) -> None:
+        """Batch insert products using executemany."""
         
-        if not products_data:
-            return
-            
-        try:
-            self.conn.executemany(
-                """INSERT OR REPLACE INTO products 
-                   (id, brand_id, name, url, description, image_path, 
-                    ingredient_ids_json, key_ingredient_ids_json, other_ingredient_ids_json, 
-                    free_tag_ids_json, discontinued, replacement_product_url, 
-                    details_scraped, last_checked_at, last_updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                products_data
-            )
-            self.conn.commit()
-            LOGGER.debug("Batch inserted %d products", len(products_data))
-        except sqlite3.Error as exc:
-            LOGGER.error("Failed to batch insert products: %s", exc)
-            self.conn.rollback()
-            raise
+        self.conn.executemany(
+            """
+            INSERT OR IGNORE INTO products (id, brand_id, name, url, last_checked_at, last_updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            products
+        )
+        self.conn.commit()
 
-    def batch_insert_ingredients(self, ingredients_data: list) -> None:
-        """Insert multiple ingredients in a single transaction."""
+    def batch_insert_ingredients(self, ingredients: List[Tuple]) -> None:
+        """Batch insert ingredients using executemany."""
         
-        if not ingredients_data:
-            return
-            
-        try:
-            self.conn.executemany(
-                """INSERT OR REPLACE INTO ingredients 
-                   (id, name, url, rating_tag, also_called, irritancy, comedogenicity,
-                    details_text, cosing_cas_numbers_json, cosing_ec_numbers_json,
-                    cosing_identified_ingredients_json, cosing_regulation_provisions_json,
-                    cosing_function_ids_json, quick_facts_json, proof_references_json,
-                    last_checked_at, last_updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                ingredients_data
-            )
-            self.conn.commit()
-            LOGGER.debug("Batch inserted %d ingredients", len(ingredients_data))
-        except sqlite3.Error as exc:
-            LOGGER.error("Failed to batch insert ingredients: %s", exc)
-            self.conn.rollback()
-            raise
+        self.conn.executemany(
+            """
+            INSERT OR IGNORE INTO ingredients (id, name, url, last_checked_at, last_updated_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            ingredients
+        )
+        self.conn.commit()
 
-    def batch_insert_functions(self, functions_data: list) -> None:
-        """Insert multiple functions in a single transaction."""
+    def batch_insert_functions(self, functions: List[Tuple]) -> None:
+        """Batch insert functions using executemany."""
         
-        if not functions_data:
-            return
-            
-        try:
-            self.conn.executemany(
-                """INSERT OR IGNORE INTO functions (id, name) VALUES (?, ?)""",
-                functions_data
-            )
-            self.conn.commit()
-            LOGGER.debug("Batch inserted %d functions", len(functions_data))
-        except sqlite3.Error as exc:
-            LOGGER.error("Failed to batch insert functions: %s", exc)
-            self.conn.rollback()
-            raise
+        self.conn.executemany(
+            """
+            INSERT OR IGNORE INTO functions (id, name, last_updated_at)
+            VALUES (?, ?, ?)
+            """,
+            functions
+        )
+        self.conn.commit()
 
-    def batch_insert_frees(self, frees_data: list) -> None:
-        """Insert multiple free tags in a single transaction."""
+    def batch_insert_frees(self, frees: List[Tuple]) -> None:
+        """Batch insert frees using executemany."""
         
-        if not frees_data:
-            return
-            
-        try:
-            self.conn.executemany(
-                """INSERT OR REPLACE INTO frees (id, tag, tooltip) VALUES (?, ?, ?)""",
-                frees_data
-            )
-            self.conn.commit()
-            LOGGER.debug("Batch inserted %d free tags", len(frees_data))
-        except sqlite3.Error as exc:
-            LOGGER.error("Failed to batch insert free tags: %s", exc)
-            self.conn.rollback()
-            raise
+        self.conn.executemany(
+            """
+            INSERT OR IGNORE INTO product_highlights (id, product_id, highlight_text, last_updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            frees
+        )
+        self.conn.commit()
 
-    def batch_update_products_scraped(self, product_updates: list) -> None:
-        """Update multiple products' scraped status in a single transaction."""
+    def batch_update_products_scraped(self, updates: List[Tuple]) -> None:
+        """Batch update product scraped status using executemany."""
         
-        if not product_updates:
-            return
-            
-        try:
-            self.conn.executemany(
-                "UPDATE products SET details_scraped = ? WHERE id = ?",
-                product_updates
-            )
-            self.conn.commit()
-            LOGGER.debug("Batch updated %d product scraped statuses", len(product_updates))
-        except sqlite3.Error as exc:
-            LOGGER.error("Failed to batch update product scraped status: %s", exc)
-            self.conn.rollback()
-            raise
+        self.conn.executemany(
+            """
+            UPDATE products SET details_scraped = ? WHERE id = ?
+            """,
+            updates
+        )
+        self.conn.commit()
 
-    def batch_update_brands_scraped(self, brand_updates: list) -> None:
-        """Update multiple brands' scraped status in a single transaction."""
+    def batch_update_brands_scraped(self, updates: List[Tuple]) -> None:
+        """Batch update brand scraped status using executemany."""
         
-        if not brand_updates:
-            return
-            
-        try:
-            self.conn.executemany(
-                "UPDATE brands SET products_scraped = ? WHERE id = ?",
-                brand_updates
-            )
-            self.conn.commit()
-            LOGGER.debug("Batch updated %d brand scraped statuses", len(brand_updates))
-        except sqlite3.Error as exc:
-            LOGGER.error("Failed to batch update brand scraped status: %s", exc)
-            self.conn.rollback()
-            raise
+        self.conn.executemany(
+            """
+            UPDATE brands SET products_scraped = ? WHERE id = ?
+            """,
+            updates
+        )
+        self.conn.commit()
 
+    # ------------------------------------------------------------------
+    # Utility methods
+    # ------------------------------------------------------------------
+    def _generate_id(self) -> str:
+        """Generate a unique ID for database records."""
+        
+        import uuid
+        return str(uuid.uuid4())
+
+    def _current_timestamp(self) -> str:
+        """Get current timestamp as ISO string."""
+        
+        from datetime import datetime
+        return datetime.utcnow().isoformat()
+
+    def close(self) -> None:
+        """Close database connection."""
+        
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+
+
+# Add missing import
+import logging
