@@ -15,6 +15,7 @@ class DatabaseMixin:
     """Utility mixin exposing schema and metadata helpers."""
 
     conn: sqlite3.Connection
+    db_path: str
 
     def _init_db(self) -> None:
         """Create required tables and ensure the schema is up to date."""
@@ -357,4 +358,153 @@ class DatabaseMixin:
 
         if dropped_tables:
             self.conn.commit()
+
+    def _get_thread_safe_connection(self) -> sqlite3.Connection:
+        """Create a new thread-safe SQLite connection."""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    # ------------------------------------------------------------------
+    # Batch processing methods
+    # ------------------------------------------------------------------
+    
+    def batch_insert_brands(self, brands_data: list) -> None:
+        """Insert multiple brands in a single transaction."""
+        
+        if not brands_data:
+            return
+            
+        try:
+            self.conn.executemany(
+                """INSERT OR REPLACE INTO brands 
+                   (id, name, url, products_scraped, last_checked_at, last_updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                brands_data
+            )
+            self.conn.commit()
+            LOGGER.debug("Batch inserted %d brands", len(brands_data))
+        except sqlite3.Error as exc:
+            LOGGER.error("Failed to batch insert brands: %s", exc)
+            self.conn.rollback()
+            raise
+
+    def batch_insert_products(self, products_data: list) -> None:
+        """Insert multiple products in a single transaction."""
+        
+        if not products_data:
+            return
+            
+        try:
+            self.conn.executemany(
+                """INSERT OR REPLACE INTO products 
+                   (id, brand_id, name, url, description, image_path, 
+                    ingredient_ids_json, key_ingredient_ids_json, other_ingredient_ids_json, 
+                    free_tag_ids_json, discontinued, replacement_product_url, 
+                    details_scraped, last_checked_at, last_updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                products_data
+            )
+            self.conn.commit()
+            LOGGER.debug("Batch inserted %d products", len(products_data))
+        except sqlite3.Error as exc:
+            LOGGER.error("Failed to batch insert products: %s", exc)
+            self.conn.rollback()
+            raise
+
+    def batch_insert_ingredients(self, ingredients_data: list) -> None:
+        """Insert multiple ingredients in a single transaction."""
+        
+        if not ingredients_data:
+            return
+            
+        try:
+            self.conn.executemany(
+                """INSERT OR REPLACE INTO ingredients 
+                   (id, name, url, rating_tag, also_called, irritancy, comedogenicity,
+                    details_text, cosing_cas_numbers_json, cosing_ec_numbers_json,
+                    cosing_identified_ingredients_json, cosing_regulation_provisions_json,
+                    cosing_function_ids_json, quick_facts_json, proof_references_json,
+                    last_checked_at, last_updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ingredients_data
+            )
+            self.conn.commit()
+            LOGGER.debug("Batch inserted %d ingredients", len(ingredients_data))
+        except sqlite3.Error as exc:
+            LOGGER.error("Failed to batch insert ingredients: %s", exc)
+            self.conn.rollback()
+            raise
+
+    def batch_insert_functions(self, functions_data: list) -> None:
+        """Insert multiple functions in a single transaction."""
+        
+        if not functions_data:
+            return
+            
+        try:
+            self.conn.executemany(
+                """INSERT OR IGNORE INTO functions (id, name) VALUES (?, ?)""",
+                functions_data
+            )
+            self.conn.commit()
+            LOGGER.debug("Batch inserted %d functions", len(functions_data))
+        except sqlite3.Error as exc:
+            LOGGER.error("Failed to batch insert functions: %s", exc)
+            self.conn.rollback()
+            raise
+
+    def batch_insert_frees(self, frees_data: list) -> None:
+        """Insert multiple free tags in a single transaction."""
+        
+        if not frees_data:
+            return
+            
+        try:
+            self.conn.executemany(
+                """INSERT OR REPLACE INTO frees (id, tag, tooltip) VALUES (?, ?, ?)""",
+                frees_data
+            )
+            self.conn.commit()
+            LOGGER.debug("Batch inserted %d free tags", len(frees_data))
+        except sqlite3.Error as exc:
+            LOGGER.error("Failed to batch insert free tags: %s", exc)
+            self.conn.rollback()
+            raise
+
+    def batch_update_products_scraped(self, product_updates: list) -> None:
+        """Update multiple products' scraped status in a single transaction."""
+        
+        if not product_updates:
+            return
+            
+        try:
+            self.conn.executemany(
+                "UPDATE products SET details_scraped = ? WHERE id = ?",
+                product_updates
+            )
+            self.conn.commit()
+            LOGGER.debug("Batch updated %d product scraped statuses", len(product_updates))
+        except sqlite3.Error as exc:
+            LOGGER.error("Failed to batch update product scraped status: %s", exc)
+            self.conn.rollback()
+            raise
+
+    def batch_update_brands_scraped(self, brand_updates: list) -> None:
+        """Update multiple brands' scraped status in a single transaction."""
+        
+        if not brand_updates:
+            return
+            
+        try:
+            self.conn.executemany(
+                "UPDATE brands SET products_scraped = ? WHERE id = ?",
+                brand_updates
+            )
+            self.conn.commit()
+            LOGGER.debug("Batch updated %d brand scraped statuses", len(brand_updates))
+        except sqlite3.Error as exc:
+            LOGGER.error("Failed to batch update brand scraped status: %s", exc)
+            self.conn.rollback()
+            raise
 
