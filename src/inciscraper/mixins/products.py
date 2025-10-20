@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 
 from ..constants import PROGRESS_LOG_INTERVAL, REQUEST_SLEEP
@@ -17,6 +18,7 @@ class ProductScraperMixin:
     """Mixin implementing product list scraping."""
 
     conn: sqlite3.Connection
+    max_workers: int
 
     def scrape_products(
         self,
@@ -48,38 +50,53 @@ class ProductScraperMixin:
             LOGGER.info("Product workload: revalidating %s brand(s)", total_brands)
         else:
             LOGGER.info("Product workload: %s brand(s) awaiting scraping", total_brands)
+        
+        # Create progress bar for brand processing
+        self.create_progress_bar("brands", total_brands, "Processing brands")
         processed = 0
-        for brand in pending_brands:
-            brand_id = brand["id"]
-            brand_url = brand["url"]
-            resume_key = f"brand_products_next_offset:{brand_id}"
-            if rescan_all:
-                start_offset = 1
-                self._delete_metadata(resume_key)
-            else:
-                start_offset = int(self._get_metadata(resume_key, "1"))
-            if start_offset > 1:
-                LOGGER.info(
-                    "Resuming product collection for brand %s from offset %s",
-                    brand["name"],
-                    start_offset,
-                )
-            LOGGER.info("Collecting products for brand %s (%s)", brand["name"], brand_url)
-            products_found, completed, next_offset = self._collect_products_for_brand(
-                brand_id,
-                brand_url,
-                start_offset=start_offset,
-                max_products=max_products_per_brand,
+        # Temporarily disable parallel processing due to SQLite thread safety issues
+        # TODO: Implement proper thread-safe database operations
+        if False:  # self.max_workers > 1:
+            # Use parallel processing for multiple workers
+            processed = self._scrape_brands_parallel(
+                pending_brands,
+                max_products_per_brand=max_products_per_brand,
+                total_brands=total_brands,
             )
-            self.conn.commit()
-            if completed:
-                self.conn.execute(
-                    "UPDATE brands SET products_scraped = 1 WHERE id = ?",
-                    (brand_id,),
+        else:
+            # Use sequential processing for single worker
+            for brand in pending_brands:
+                brand_id = brand["id"]
+                brand_url = brand["url"]
+                resume_key = f"brand_products_next_offset:{brand_id}"
+                if rescan_all:
+                    start_offset = 1
+                    self._delete_metadata(resume_key)
+                else:
+                    start_offset = int(self._get_metadata(resume_key, "1"))
+                if start_offset > 1:
+                    LOGGER.info(
+                        "Resuming product collection for brand %s from offset %s",
+                        brand["name"],
+                        start_offset,
+                    )
+                LOGGER.info("Collecting products for brand %s (%s)", brand["name"], brand_url)
+                products_found, completed, next_offset = self._collect_products_for_brand(
+                    brand_id,
+                    brand_url,
+                    start_offset=start_offset,
+                    max_products=max_products_per_brand,
+                    connection=self.conn,
                 )
                 self.conn.commit()
+                if completed:
+                    self.conn.execute(
+                        "UPDATE brands SET products_scraped = 1 WHERE id = ?",
+                        (brand_id,),
+                    )
+                    self.conn.commit()
                 self._delete_metadata(resume_key)
-                product_total = self._count_products_for_brand(brand_id)
+                product_total = self._count_products_for_brand(brand_id, connection=self.conn)
                 if product_total == 0:
                     LOGGER.warning(
                         "Brand %s marked complete but no products recorded – flagging for review",
@@ -95,16 +112,132 @@ class ProductScraperMixin:
                     brand["name"],
                     next_offset,
                 )
+                status = "complete" if completed else "incomplete"
+                LOGGER.info(
+                    "Finished brand %s – %s products recorded (%s)",
+                    brand["name"],
+                    products_found,
+                    status,
+                )
+                processed += 1
+                self.update_progress("brands", 1)
+                if processed % PROGRESS_LOG_INTERVAL == 0 or processed == total_brands:
+                    self._log_progress("Brand", processed, total_brands)
+
+    def _scrape_brands_parallel(
+        self,
+        brands: List[Tuple],
+        *,
+        max_products_per_brand: Optional[int] = None,
+        total_brands: int,
+    ) -> int:
+        """Process brands in parallel using ThreadPoolExecutor."""
+        
+        processed = 0
+        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+            # Submit all brand processing tasks
+            future_to_brand = {}
+            for brand in brands:
+                future = executor.submit(
+                    self._process_single_brand,
+                    brand,
+                    max_products_per_brand
+                )
+                future_to_brand[future] = brand
+            
+            # Process completed tasks as they finish
+            for future in as_completed(future_to_brand):
+                brand = future_to_brand[future]
+                try:
+                    result = future.result()
+                    processed += 1
+                    self.update_progress("brands", 1)
+                    if processed % PROGRESS_LOG_INTERVAL == 0 or processed == total_brands:
+                        self._log_progress("Brand", processed, total_brands)
+                except Exception as exc:
+                    LOGGER.error("Brand %s generated an exception: %s", brand["name"], exc)
+        
+        return processed
+
+    def _process_single_brand(
+        self,
+        brand: Tuple,
+        max_products_per_brand: Optional[int] = None,
+    ) -> None:
+        """Process a single brand (for parallel execution)."""
+        
+        brand_id = brand["id"]
+        brand_url = brand["url"]
+        brand_name = brand["name"]
+        
+        LOGGER.info("Processing brand %s", brand_name)
+        
+        # Check for resume point
+        resume_key = f"brand_products_next_offset:{brand_id}"
+        start_offset = int(self._get_metadata(resume_key, "1"))
+        
+        if start_offset > 1:
+            LOGGER.info(
+                "Resuming product collection for brand %s from offset %s",
+                brand_name,
+                start_offset,
+            )
+        
+        try:
+            # Create thread-safe connection first
+            thread_conn = self._get_thread_safe_connection()
+            
+            products_found, completed, next_offset = self._collect_products_for_brand(
+                brand_id,
+                brand_url,
+                start_offset=start_offset,
+                max_products=max_products_per_brand,
+                connection=thread_conn,
+            )
+            
+            # Use a separate connection for thread safety
+            thread_conn = self._get_thread_safe_connection()
+            
+            if completed:
+                thread_conn.execute(
+                    "UPDATE brands SET products_scraped = 1 WHERE id = ?",
+                    (brand_id,),
+                )
+                thread_conn.commit()
+                self._delete_metadata(resume_key)
+                product_total = thread_conn.execute(
+                    "SELECT COUNT(*) FROM products WHERE brand_id = ?", (brand_id,)
+                ).fetchone()[0]
+                
+                if product_total == 0:
+                    LOGGER.warning(
+                        "Brand %s marked complete but no products recorded – flagging for review",
+                        brand_name,
+                    )
+                    self._set_metadata(f"brand_empty_products:{brand_id}", "1")
+                else:
+                    self._delete_metadata(f"brand_empty_products:{brand_id}")
+            else:
+                self._set_metadata(resume_key, str(next_offset))
+                LOGGER.info(
+                    "Product collection for brand %s interrupted – will retry from offset %s",
+                    brand_name,
+                    next_offset,
+                )
+            
             status = "complete" if completed else "incomplete"
             LOGGER.info(
                 "Finished brand %s – %s products recorded (%s)",
-                brand["name"],
+                brand_name,
                 products_found,
                 status,
             )
-            processed += 1
-            if processed % PROGRESS_LOG_INTERVAL == 0 or processed == total_brands:
-                self._log_progress("Brand", processed, total_brands)
+            
+            thread_conn.close()
+            
+        except Exception as exc:
+            LOGGER.error("Error processing brand %s: %s", brand_name, exc)
+            raise
 
     def _collect_products_for_brand(
         self,
@@ -113,14 +246,18 @@ class ProductScraperMixin:
         *,
         start_offset: int = 1,
         max_products: Optional[int] = None,
+        connection: Optional[sqlite3.Connection] = None,
     ) -> Tuple[int, bool, int]:
         """Walk through paginated product listings for a brand."""
 
+        # Use provided connection or fall back to main connection
+        conn = connection or self.conn
+        
         offset = start_offset
         total = 0
         existing_total = 0
         if max_products is not None:
-            existing_total = self._count_products_for_brand(brand_id)
+            existing_total = self._count_products_for_brand(brand_id, connection=conn)
             if existing_total >= max_products:
                 LOGGER.debug(
                     "Brand %s already has %s product(s) – skipping due to limit",
@@ -172,7 +309,7 @@ class ProductScraperMixin:
                 LOGGER.debug("No more products found on %s", page_url)
                 return total, True, offset
             for name, url in products:
-                inserted = self._insert_product(brand_id, name, url)
+                inserted = self._insert_product(brand_id, name, url, connection=conn)
                 if inserted:
                     total += 1
                 if (
@@ -219,10 +356,11 @@ class ProductScraperMixin:
             )
         self.conn.commit()
 
-    def _count_products_for_brand(self, brand_id: str) -> int:
+    def _count_products_for_brand(self, brand_id: str, *, connection: Optional[sqlite3.Connection] = None) -> int:
         """Return how many products have been stored for the brand."""
 
-        cursor = self.conn.execute(
+        conn = connection or self.conn
+        cursor = conn.execute(
             "SELECT COUNT(*) FROM products WHERE brand_id = ?",
             (brand_id,),
         )
@@ -255,11 +393,12 @@ class ProductScraperMixin:
             products.append((name, absolute))
         return products
 
-    def _insert_product(self, brand_id: str, name: str, url: str) -> bool:
+    def _insert_product(self, brand_id: str, name: str, url: str, *, connection: Optional[sqlite3.Connection] = None) -> bool:
         """Persist a product, updating its name if it already exists."""
 
+        conn = connection or self.conn
         now = self._current_timestamp()
-        row = self.conn.execute(
+        row = conn.execute(
             "SELECT id, brand_id, name, last_updated_at FROM products WHERE url = ?",
             (url,),
         ).fetchone()
@@ -267,7 +406,7 @@ class ProductScraperMixin:
             while True:
                 product_id = self._generate_id()
                 try:
-                    self.conn.execute(
+                    conn.execute(
                         """
                         INSERT INTO products (
                             id, brand_id, name, url, details_scraped, last_checked_at, last_updated_at
@@ -293,7 +432,7 @@ class ProductScraperMixin:
         if updates:
             assignments = ", ".join(f"{column} = ?" for column in updates)
             params = list(updates.values()) + [row["id"]]
-            self.conn.execute(
+            conn.execute(
                 f"UPDATE products SET {assignments} WHERE id = ?",
                 params,
             )
