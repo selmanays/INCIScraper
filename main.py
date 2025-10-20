@@ -1,206 +1,139 @@
 """Command line interface for running the INCIDecoder scraper."""
-from __future__ import annotations
 
 import argparse
 import logging
+import sys
 from pathlib import Path
-from typing import Optional
+
+# Add src to Python path for imports
+src_path = Path(__file__).parent / "src"
+sys.path.insert(0, str(src_path))
 
 from inciscraper import INCIScraper
 
 
-def build_parser() -> argparse.ArgumentParser:
-    """Create and configure the command line argument parser.
+def setup_logging(log_level: str = "INFO"):
+    """Set up logging configuration."""
+    level = getattr(logging, log_level.upper(), logging.INFO)
+    
+    # Create logs directory if it doesn't exist
+    logs_dir = Path("data/logs")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Configure logging
+    logging.basicConfig(
+        level=level,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(logs_dir / "inciscraper.log"),
+            logging.StreamHandler(sys.stdout)
+        ]
+    )
 
-    Türkçe: Komut satırı argümanlarını ayrıştıracak `ArgumentParser` nesnesini
-    oluşturup tüm seçenekleri tanımlar.
-    """
+
+def main():
+    """Main entry point for the CLI."""
     parser = argparse.ArgumentParser(
-        description=(
-            "Scrape brand, product and ingredient information from INCIDecoder "
-            "and persist the results into a local SQLite database."
-        )
+        description="INCIDecoder scraper for collecting cosmetic product data",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s --sample-data                    # Run with sample data
+  %(prog)s --max-workers 4                  # Use 4 parallel workers
+  %(prog)s --batch-size 50                  # Process 50 items per batch
+  %(prog)s --skip-images                    # Skip image downloading
+  %(prog)s --log-level DEBUG                # Enable debug logging
+        """
     )
-    default_data_dir = Path("data")
-    parser.add_argument(
-        "--db",
-        default=str(default_data_dir / "incidecoder.db"),
-        help="SQLite database path (default: data/incidecoder.db)",
-    )
-    parser.add_argument(
-        "--images-dir",
-        default=str(default_data_dir / "images"),
-        help="Directory where downloaded product images will be stored",
-    )
-    parser.add_argument(
-        "--base-url",
-        default="https://incidecoder.com",
-        help="Override the INCIDecoder base URL (useful for testing)",
-    )
-    parser.add_argument(
-        "--alternate-base-url",
-        action="append",
-        default=None,
-        metavar="URL",
-        help=(
-            "Additional base URLs that will be tried automatically if the primary host "
-            "cannot be resolved. The option can be specified multiple times."
-        ),
-    )
-    parser.add_argument(
-        "--step",
-        choices=["all", "brands", "products", "details"],
-        default="all",
-        help="Run only a specific pipeline step",
-    )
-    parser.add_argument(
-        "--max-pages",
-        type=int,
-        default=None,
-        metavar="N",
-        help=(
-            "Limit the number of brand listing pages fetched during the brands step. "
-            "Ignored for other steps."
-        ),
-    )
-    parser.add_argument(
-        "--resume/--no-resume",
-        dest="resume",
-        default=False,
-        action=argparse.BooleanOptionalAction,
-        help="Skip completed steps when running the full pipeline",
-    )
-    parser.add_argument(
-        "--log-level",
-        default="ERROR",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help=(
-            "Logging verbosity (default: ERROR). Use INFO or DEBUG to capture the full pipeline."
-        ),
-    )
-    parser.add_argument(
-        "--log-output",
-        action="store_true",
-        help=(
-            "Write log output to data/logs/inciscraper.log in addition to the console"
-        ),
-    )
+    
+    # Data source options
     parser.add_argument(
         "--sample-data",
         action="store_true",
-        help=(
-            "Generate a small verification dataset instead of running the full pipeline. "
-            "The sample database will contain three brands with a single fully scraped "
-            "product each."
-        ),
+        help="Use sample data for testing (default: False)"
     )
-    return parser
-
-
-def configure_logging(level: str, *, log_to_file: bool = False) -> Optional[Path]:
-    """Initialise the logging configuration for the CLI.
-
-    Türkçe: Komut satırı aracının günlük yapılandırmasını verilen ayrıntı
-    seviyesine göre kurar.
-    """
-    log_level = getattr(logging, level.upper(), logging.ERROR)
-    handlers = [logging.StreamHandler()]
-    log_file_path: Optional[Path] = None
-    if log_to_file:
-        logs_dir = Path("data") / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        log_file_path = logs_dir / "inciscraper.log"
-        handlers.append(logging.FileHandler(log_file_path, encoding="utf-8"))
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=handlers,
-        force=True,
+    
+    # Performance options
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=1,
+        help="Maximum number of parallel workers for HTTP requests (default: 1)"
     )
-    return log_file_path
-
-
-def main(argv: list[str] | None = None) -> int:
-    """Entry point used by both the module and command line execution.
-
-    Türkçe: Hem modül hem de doğrudan komut satırı çalıştırmaları için başlangıç
-    noktası olup, argümanları okur, scraper'ı başlatır ve seçilen adımları
-    yürütür.
-    """
-    parser = build_parser()
-    args = parser.parse_args(argv)
-    if args.max_pages is not None and args.max_pages < 1:
-        parser.error("--max-pages must be a positive integer")
-    log_file = configure_logging(args.log_level, log_to_file=args.log_output)
-    if log_file:
-        print(f"Logging to {log_file}")
-    db_path = args.db
-    images_dir = Path(args.images_dir)
-    if args.sample_data:
-        images_dir = Path("data") / "sample_images"
-    images_dir.mkdir(parents=True, exist_ok=True)
-    if args.sample_data:
-        db_path_obj = Path(db_path)
-        if not db_path_obj.name.startswith("sample_"):
-            db_path_obj = db_path_obj.with_name(f"sample_{db_path_obj.name}")
-        db_path = str(db_path_obj)
-    db_path_obj = Path(db_path)
-    db_path_obj.parent.mkdir(parents=True, exist_ok=True)
-    scraper = INCIScraper(
-        db_path=db_path,
-        image_dir=str(images_dir),
-        base_url=args.base_url,
-        alternate_base_urls=args.alternate_base_url,
+    
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=50,
+        help="Number of items to process in each batch (default: 50)"
     )
+    
+    parser.add_argument(
+        "--image-workers",
+        type=int,
+        default=4,
+        help="Number of parallel workers for image processing (default: 4)"
+    )
+    
+    parser.add_argument(
+        "--skip-images",
+        action="store_true",
+        help="Skip downloading and processing images (default: False)"
+    )
+    
+    # Logging options
+    parser.add_argument(
+        "--log-level",
+        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+        default="INFO",
+        help="Set the logging level (default: INFO)"
+    )
+    
+    # Database options
+    parser.add_argument(
+        "--db-path",
+        type=str,
+        default="data/incidecoder.db",
+        help="Path to SQLite database file (default: data/incidecoder.db)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Set up logging
+    setup_logging(args.log_level)
+    
+    # Initialize scraper
     try:
+        scraper = INCIScraper(
+            db_path=args.db_path,
+            max_workers=args.max_workers,
+            batch_size=args.batch_size,
+            image_workers=args.image_workers,
+            skip_images=args.skip_images
+        )
+        
+        # Run scraper
         if args.sample_data:
-            logging.info("Generating sample dataset (3 brands × 1 product each)")
-            scraper.generate_sample_dataset(brand_count=3, products_per_brand=1)
+            print("🚀 Starting INCIScraper with sample data...")
+            scraper.run_sample_data()
         else:
-            if args.resume:
-                scraper.resume_incomplete_metadata()
-            summary = scraper.get_workload_summary()
-            brand_pages_remaining = summary["brand_pages_remaining"]
-            brand_pages_text = (
-                str(brand_pages_remaining) if brand_pages_remaining is not None else "unknown"
-            )
-            logging.info(
-                "Initial workload – brand pages remaining: %s, brands pending products: %s, products pending details: %s",
-                brand_pages_text,
-                summary["brands_pending_products"],
-                summary["products_pending_details"],
-            )
-            logging.info(
-                "Database snapshot – stored brands: %s, stored products: %s",
-                summary["brands_total"],
-                summary["products_total"],
-            )
-            if args.step in {"all", "brands"}:
-                if args.step == "brands" or not args.resume or scraper.has_brand_work():
-                    scraper.scrape_brands(
-                        reset_offset=not args.resume,
-                        max_pages=args.max_pages,
-                    )
-                else:
-                    logging.info("Skipping brand collection – already complete")
-            if args.step in {"all", "products"}:
-                if args.step == "products" or not args.resume or scraper.has_product_work():
-                    scraper.scrape_products(rescan_all=not args.resume)
-                else:
-                    logging.info("Skipping product collection – nothing left to do")
-            if args.step in {"all", "details"}:
-                if (
-                    args.step == "details"
-                    or not args.resume
-                    or scraper.has_product_detail_work()
-                ):
-                    scraper.scrape_product_details(rescan_all=not args.resume)
-                else:
-                    logging.info("Skipping product detail collection – nothing left to do")
+            print("🚀 Starting INCIScraper...")
+            scraper.run()
+            
+        print("✅ Scraping completed successfully!")
+        
+    except KeyboardInterrupt:
+        print("\n⚠️  Scraping interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        logging.exception("Unexpected error occurred")
+        sys.exit(1)
     finally:
-        scraper.close()
-    return 0
+        # Ensure scraper is properly closed
+        if 'scraper' in locals():
+            scraper.close()
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    main()
