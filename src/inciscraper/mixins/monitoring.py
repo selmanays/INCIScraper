@@ -1,141 +1,173 @@
-"""Progress tracking and performance monitoring utilities."""
+"""Monitoring and performance tracking utilities for INCIScraper."""
 
 from __future__ import annotations
 
 import logging
 import time
-from collections import defaultdict
-from typing import Any, Dict, Optional
-
-try:
-    from tqdm import tqdm
-except ImportError:  # pragma: no cover - optional dependency
-    tqdm = None
+from typing import Dict, List, Optional
 
 LOGGER = logging.getLogger(__name__)
 
 
 class MonitoringMixin:
-    """Provide progress tracking and performance monitoring capabilities."""
-
-    _performance_metrics: Dict[str, Any]
-    _progress_bars: Dict[str, Any]
-
-    def __init__(self) -> None:
-        """Initialize monitoring state."""
-        self._performance_metrics = defaultdict(list)
-        self._progress_bars = {}
-
-    def start_timer(self, operation: str) -> None:
-        """Start timing an operation."""
-        self._performance_metrics[f"{operation}_start"] = time.time()
-
-    def end_timer(self, operation: str) -> float:
-        """End timing an operation and return duration."""
-        start_key = f"{operation}_start"
-        if start_key not in self._performance_metrics:
-            LOGGER.warning("Timer for %s was not started", operation)
-            return 0.0
+    """Mixin providing performance monitoring and progress tracking."""
+    
+    def __init__(self):
+        # Performance tracking
+        self._start_time: Optional[float] = None
+        self._stage_start_time: Optional[float] = None
+        self._current_stage: str = ""
         
-        start_time = self._performance_metrics[start_key]
-        duration = time.time() - start_time
-        self._performance_metrics[f"{operation}_duration"] = duration
-        self._performance_metrics[f"{operation}_count"] = self._performance_metrics.get(f"{operation}_count", 0) + 1
+        # Request metrics
+        self._total_requests = 0
+        self._successful_requests = 0
+        self._failed_requests = 0
+        self._request_times: List[float] = []
         
-        # Store in history for averaging
-        history_key = f"{operation}_history"
-        if history_key not in self._performance_metrics:
-            self._performance_metrics[history_key] = []
-        self._performance_metrics[history_key].append(duration)
+        # Stage metrics
+        self._stage_metrics: Dict[str, Dict] = {}
         
-        # Keep only last 100 measurements
-        if len(self._performance_metrics[history_key]) > 100:
-            self._performance_metrics[history_key] = self._performance_metrics[history_key][-100:]
+        # Progress tracking
+        self._total_items = 0
+        self._processed_items = 0
+        self._last_progress_log_time = 0.0
+    
+    def _start_monitoring(self) -> None:
+        """Start overall monitoring session."""
+        self._start_time = time.perf_counter()
+        LOGGER.info("Performance monitoring started")
+    
+    def _start_stage(self, stage_name: str, total_items: int = 0) -> None:
+        """Start monitoring a specific stage."""
+        if self._stage_start_time is not None:
+            self._end_stage()
         
-        return duration
-
-    def get_average_time(self, operation: str) -> float:
-        """Get average time for an operation."""
-        history_key = f"{operation}_history"
-        history = self._performance_metrics.get(history_key, [])
-        return sum(history) / len(history) if history else 0.0
-
-    def get_operation_count(self, operation: str) -> int:
-        """Get total count for an operation."""
-        return self._performance_metrics.get(f"{operation}_count", 0)
-
-    def create_progress_bar(self, name: str, total: int, desc: str = "") -> None:
-        """Create a progress bar for tracking progress."""
-        if tqdm is None:
-            LOGGER.info("tqdm not available, using basic logging for progress tracking")
-            return
+        self._current_stage = stage_name
+        self._stage_start_time = time.perf_counter()
+        self._total_items = total_items
+        self._processed_items = 0
         
-        if name in self._progress_bars:
-            self._progress_bars[name].close()
+        LOGGER.info("Starting stage: %s (total items: %s)", stage_name, total_items or "unknown")
+    
+    def _end_stage(self) -> Dict:
+        """End current stage monitoring and return metrics."""
+        if self._stage_start_time is None:
+            return {}
         
-        self._progress_bars[name] = tqdm(
-            total=total,
-            desc=desc or name,
-            unit="item",
-            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+        elapsed = time.perf_counter() - self._stage_start_time
+        items_per_second = self._processed_items / elapsed if elapsed > 0 else 0
+        
+        stage_metrics = {
+            'stage': self._current_stage,
+            'elapsed_seconds': elapsed,
+            'total_items': self._total_items,
+            'processed_items': self._processed_items,
+            'items_per_second': items_per_second,
+            'remaining_items': max(0, self._total_items - self._processed_items),
+            'eta_seconds': (self._total_items - self._processed_items) / items_per_second if items_per_second > 0 else 0,
+        }
+        
+        self._stage_metrics[self._current_stage] = stage_metrics
+        
+        LOGGER.info(
+            "Stage %s completed: %.2fs, %s items (%.2f items/sec), ETA: %.1fs",
+            self._current_stage,
+            elapsed,
+            self._processed_items,
+            items_per_second,
+            stage_metrics['eta_seconds']
         )
-
-    def update_progress(self, name: str, increment: int = 1) -> None:
-        """Update progress bar."""
-        if name in self._progress_bars and self._progress_bars[name] is not None:
-            self._progress_bars[name].update(increment)
-
-    def close_progress_bar(self, name: str) -> None:
-        """Close and cleanup progress bar."""
-        if name in self._progress_bars and self._progress_bars[name] is not None:
-            self._progress_bars[name].close()
-            del self._progress_bars[name]
-
-    def close_all_progress_bars(self) -> None:
-        """Close all progress bars."""
-        for name in list(self._progress_bars.keys()):
-            self.close_progress_bar(name)
-
-    def log_performance_summary(self) -> None:
-        """Log a summary of performance metrics."""
-        LOGGER.info("Performance Summary:")
-        LOGGER.info("-" * 50)
         
-        operations = set()
-        for key in self._performance_metrics.keys():
-            if key.endswith("_duration"):
-                operation = key.replace("_duration", "")
-                operations.add(operation)
+        self._stage_start_time = None
+        self._current_stage = ""
+        return stage_metrics
+    
+    def _record_request(self, success: bool, request_time: float) -> None:
+        """Record a request for performance tracking."""
+        self._total_requests += 1
+        if success:
+            self._successful_requests += 1
+        else:
+            self._failed_requests += 1
         
-        for operation in operations:
-            count = self.get_operation_count(operation)
-            avg_time = self.get_average_time(operation)
-            total_time = self._performance_metrics.get(f"{operation}_duration", 0.0)
+        self._request_times.append(request_time)
+        
+        # Keep only last 1000 request times to avoid memory issues
+        if len(self._request_times) > 1000:
+            self._request_times = self._request_times[-1000:]
+    
+    def _update_progress(self, items_processed: int = 1) -> None:
+        """Update progress for current stage."""
+        self._processed_items += items_processed
+        
+        # Log progress every 10 seconds or every 10% completion
+        current_time = time.perf_counter()
+        if (current_time - self._last_progress_log_time > 10.0 or 
+            (self._total_items > 0 and self._processed_items % max(1, self._total_items // 10) == 0)):
             
-            LOGGER.info(
-                "%s: %d operations, avg %.2fs, total %.2fs",
-                operation.title(),
-                count,
-                avg_time,
-                total_time
-            )
-        
-        LOGGER.info("-" * 50)
-
-    def estimate_remaining_time(self, operation: str, completed: int, total: int) -> float:
-        """Estimate remaining time for an operation."""
-        if completed <= 0 or total <= 0:
+            if self._total_items > 0:
+                progress_percent = (self._processed_items / self._total_items) * 100
+                eta_seconds = self._get_current_stage_eta()
+                LOGGER.info(
+                    "Progress: %s/%s (%.1f%%) - ETA: %.1fs",
+                    self._processed_items,
+                    self._total_items,
+                    progress_percent,
+                    eta_seconds
+                )
+            else:
+                LOGGER.info("Progress: %s items processed", self._processed_items)
+            
+            self._last_progress_log_time = current_time
+    
+    def _get_current_stage_eta(self) -> float:
+        """Get estimated time remaining for current stage."""
+        if (self._stage_start_time is None or 
+            self._total_items == 0 or 
+            self._processed_items == 0):
             return 0.0
         
-        avg_time = self.get_average_time(operation)
-        remaining_items = total - completed
-        return avg_time * remaining_items
-
-    def get_throughput(self, operation: str) -> float:
-        """Get operations per second for an operation."""
-        history = self._performance_metrics.get(f"{operation}_history", [])
-        if not history:
-            return 0.0
+        elapsed = time.perf_counter() - self._stage_start_time
+        items_per_second = self._processed_items / elapsed if elapsed > 0 else 0
+        remaining_items = max(0, self._total_items - self._processed_items)
         
-        avg_time = sum(history) / len(history)
-        return 1.0 / avg_time if avg_time > 0 else 0.0
+        return remaining_items / items_per_second if items_per_second > 0 else 0.0
+    
+    def _get_performance_summary(self) -> Dict:
+        """Get comprehensive performance summary."""
+        total_elapsed = time.perf_counter() - self._start_time if self._start_time else 0.0
+        
+        # Calculate request statistics
+        avg_request_time = sum(self._request_times) / len(self._request_times) if self._request_times else 0.0
+        success_rate = self._successful_requests / self._total_requests if self._total_requests > 0 else 0.0
+        
+        return {
+            'total_elapsed_seconds': total_elapsed,
+            'total_requests': self._total_requests,
+            'successful_requests': self._successful_requests,
+            'failed_requests': self._failed_requests,
+            'success_rate': success_rate,
+            'average_request_time': avg_request_time,
+            'requests_per_second': self._total_requests / total_elapsed if total_elapsed > 0 else 0.0,
+            'stage_metrics': self._stage_metrics,
+            'current_stage_eta': self._get_current_stage_eta(),
+        }
+    
+    def _log_performance_summary(self) -> None:
+        """Log comprehensive performance summary."""
+        summary = self._get_performance_summary()
+        
+        LOGGER.info("=== Performance Summary ===")
+        LOGGER.info("Total elapsed time: %.2fs", summary['total_elapsed_seconds'])
+        LOGGER.info("Total requests: %s (%.1f%% success rate)", 
+                   summary['total_requests'], summary['success_rate'] * 100)
+        LOGGER.info("Average request time: %.3fs", summary['average_request_time'])
+        LOGGER.info("Requests per second: %.2f", summary['requests_per_second'])
+        
+        for stage_name, metrics in summary['stage_metrics'].items():
+            LOGGER.info("Stage %s: %.2fs, %.2f items/sec", 
+                       stage_name, metrics['elapsed_seconds'], metrics['items_per_second'])
+        
+        if self._current_stage:
+            LOGGER.info("Current stage %s ETA: %.1fs", 
+                       self._current_stage, summary['current_stage_eta'])

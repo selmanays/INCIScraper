@@ -1,93 +1,59 @@
-"""Product detail scraping mixin for INCIScraper."""
+"""Product detail scraping, ingredient persistence and CosIng helpers."""
+
 from __future__ import annotations
 
 import json
+import logging
 import re
+import sqlite3
 import time
-from collections import OrderedDict
-from typing import List, Optional, Tuple
+import unicodedata
+from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib import parse
 
-from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+try:  # pragma: no cover - optional dependency safeguard
+    from playwright.sync_api import (
+        Error as PlaywrightError,
+        TimeoutError as PlaywrightTimeoutError,
+        sync_playwright,
+    )
+except ModuleNotFoundError:  # pragma: no cover - fallback when Playwright missing
+    PlaywrightError = Exception  # type: ignore[assignment]
+    PlaywrightTimeoutError = TimeoutError  # type: ignore[assignment]
+    sync_playwright = None  # type: ignore[assignment]
 
-from inciscraper.constants import (
-    CACHE_SIZE_LIMIT,
-    DEFAULT_BATCH_SIZE,
+from ..constants import (
+    COSING_BASE_URL,
+    INGREDIENT_FETCH_ATTEMPTS,
+    INGREDIENT_PLACEHOLDER_MARKER,
     PROGRESS_LOG_INTERVAL,
 )
-from inciscraper.mixins.database import DatabaseMixin
-from inciscraper.mixins.monitoring import MonitoringMixin
-from inciscraper.mixins.network import NetworkMixin
-from inciscraper.types import Ingredient, ProductDetails
+from ..models import (
+    CosIngRecord,
+    FreeTag,
+    HighlightEntry,
+    IngredientDetails,
+    IngredientFunction,
+    IngredientFunctionInfo,
+    IngredientReference,
+    ProductDetails,
+    ProductHighlights,
+)
+from ..parser import Node, extract_text, parse_html
 
 LOGGER = logging.getLogger(__name__)
 
 
-class LRUCache:
-    """Simple LRU cache implementation."""
-    
-    def __init__(self, capacity: int):
-        self.capacity = capacity
-        self.cache = OrderedDict()
-    
-    def get(self, key: str) -> Optional[dict]:
-        """Get value from cache and move to end (most recently used)."""
-        if key in self.cache:
-            self.cache.move_to_end(key)
-            return self.cache[key]
-        return None
-    
-    def put(self, key: str, value: dict) -> None:
-        """Put value in cache and evict least recently used if over capacity."""
-        if key in self.cache:
-            self.cache.move_to_end(key)
-        elif len(self.cache) >= self.capacity:
-            self.cache.popitem(last=False)  # Remove least recently used
-        self.cache[key] = value
-    
-    def size(self) -> int:
-        """Return current cache size."""
-        return len(self.cache)
+class DetailScraperMixin:
+    """Handle product details, ingredient parsing and CosIng integration."""
 
-
-class DetailScraperMixin(DatabaseMixin, NetworkMixin, MonitoringMixin):
-    """Mixin for scraping product details and ingredient information."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # Initialize CosIng record cache with LRU eviction
-        self._cosing_record_cache: LRUCache = LRUCache(CACHE_SIZE_LIMIT)
-        self._load_cosing_cache_from_db()
-
-    def _load_cosing_cache_from_db(self) -> None:
-        """Load cached CosIng records from database into LRU cache."""
-        try:
-            cursor = self.conn.execute(
-                "SELECT name, cosing_cas_numbers_json, cosing_ec_numbers_json, "
-                "cosing_identified_ingredients_json, cosing_regulation_provisions_json, "
-                "cosing_function_ids_json FROM ingredients WHERE "
-                "cosing_cas_numbers_json IS NOT NULL OR cosing_ec_numbers_json IS NOT NULL "
-                "OR cosing_identified_ingredients_json IS NOT NULL "
-                "OR cosing_regulation_provisions_json IS NOT NULL "
-                "OR cosing_function_ids_json IS NOT NULL"
-            )
-            
-            loaded_count = 0
-            for row in cursor.fetchall():
-                cache_data = {
-                    'cas_numbers': json.loads(row['cosing_cas_numbers_json'] or '[]'),
-                    'ec_numbers': json.loads(row['cosing_ec_numbers_json'] or '[]'),
-                    'identified_ingredients': json.loads(row['cosing_identified_ingredients_json'] or '[]'),
-                    'regulation_provisions': json.loads(row['cosing_regulation_provisions_json'] or '[]'),
-                    'function_ids': json.loads(row['cosing_function_ids_json'] or '[]')
-                }
-                self._cosing_record_cache.put(row['name'], cache_data)
-                loaded_count += 1
-            
-            LOGGER.info(f"Loaded {loaded_count} CosIng records into LRU cache")
-            
-        except Exception as e:
-            LOGGER.warning(f"Failed to load CosIng cache from database: {e}")
+    conn: sqlite3.Connection
+    _cosing_playwright: Optional[Any]
+    _cosing_browser: Optional[Any]
+    _cosing_context: Optional[Any]
+    _cosing_page: Optional[Any]
+    _cosing_playwright_failed: bool
+    _cosing_record_cache: "LRUCache"
 
     def scrape_product_details(self, *, rescan_all: bool = False) -> None:
         """Download and persist detailed information for each product."""
@@ -101,691 +67,1460 @@ class DetailScraperMixin(DatabaseMixin, NetworkMixin, MonitoringMixin):
                 "SELECT id, brand_id, name, url, details_scraped FROM products WHERE details_scraped = 0 ORDER BY id",
             )
         pending_products = cursor.fetchall()
-        if not pending_products:
+        total_products = len(pending_products)
+        if total_products == 0:
             LOGGER.info("No products require detail scraping – skipping stage")
             return
-        
-        total_products = len(pending_products)
-        LOGGER.info("Product detail workload: %s product(s) awaiting scraping", total_products)
-        
-        # Create progress bar for product detail processing
-        self.create_progress_bar("product_details", total_products, "Processing product details")
-        
-        # Process products in batches
-        batch_size = getattr(self, 'batch_size', 50)
+        if rescan_all:
+            LOGGER.debug("Detail workload: revalidating %s product(s)", total_products)
+        else:
+            LOGGER.debug("Detail workload: %s product(s) awaiting scraping", total_products)
         processed = 0
+        for product in pending_products:
+            # Check if user requested pause/stop
+            if self._should_stop_scraping():
+                LOGGER.info("Scraping paused by user after %s products", processed)
+                return
+                
+            LOGGER.debug("Fetching product details for %s", product["url"])
+            
+            # Update current product URL in metadata for real-time UI display
+            self._set_metadata("current_product_url", product["url"])
+            
+            html = self._fetch_html(product["url"])
+            if html is None:
+                LOGGER.warning("Skipping product %s due to download error", product["url"])
+                continue
+            details = self._parse_product_page(html)
+            if not details:
+                LOGGER.warning("Could not parse product page %s", product["url"])
+                continue
+            image_path = self._download_product_image(
+                details.image_url,
+                details.name,
+                product["id"],
+            )
+            self._store_product_details(product["id"], details, image_path)
+            if not product["details_scraped"]:
+                self.conn.execute(
+                    "UPDATE products SET details_scraped = 1 WHERE id = ?",
+                    (product["id"],),
+                )
+            self.conn.commit()
+            LOGGER.debug("Stored product details for %s", details.name)
+            processed += 1
+            
+            # Update progress metadata AFTER successful commit
+            self._set_metadata("progress_details_current_product", str(processed))
+            self._set_metadata("progress_details_total_products", str(total_products))
+            if processed % PROGRESS_LOG_INTERVAL == 0 or processed == total_products:
+                self._log_progress("Product", processed, total_products)
         
-        for i in range(0, total_products, batch_size):
-            batch = pending_products[i:i + batch_size]
-            
-            # Collect image tasks for parallel processing
-            image_tasks = []
-            for product in batch:
-                product_id = product["id"]
-                product_url = product["url"]
-                product_name = product["name"]
-                
-                # Fetch product details
-                details = self._scrape_product_page(product_url, product_name)
-                if details is None:
-                    LOGGER.warning("Failed to scrape product %s", product_name)
-                    continue
-                
-                # Collect image task
-                if details.image_url:
-                    image_tasks.append((details.image_url, product_name, product_id, None))
-                
-                processed += 1
-                self.update_progress("product_details", 1)
-                
-                if processed % PROGRESS_LOG_INTERVAL == 0:
-                    self._log_progress("Product details", processed, total_products)
-            
-            # Process images in parallel
-            image_results = []
-            if image_tasks and not getattr(self, 'skip_images', False):
-                image_results = self.download_images_parallel(image_tasks, skip_images=False)
-            
-            # Store product details with image paths
-            for i, product in enumerate(batch):
-                product_id = product["id"]
-                product_url = product["url"]
-                product_name = product["name"]
-                
-                # Fetch product details again (or use cached version)
-                details = self._scrape_product_page(product_url, product_name)
-                if details is None:
-                    continue
-                
-                # Get image path from results
-                image_path = None
-                if i < len(image_results) and image_results[i]:
-                    image_path = image_results[i]
-                
-                # Store product details with image path
-                self._store_product_details(product_id, details, image_path)
-            
-            # Batch update product scraped status
-            product_updates = [(1, product["id"]) for product in batch]
-            self.batch_update_products_scraped(product_updates)
-        
-        self.close_progress_bar("product_details")
-        LOGGER.info("Product detail scraping completed")
+        # Clear current product URL when done
+        self._set_metadata("current_product_url", "")
 
-    def _scrape_product_page(self, url: str, product_name: str) -> Optional[ProductDetails]:
-        """Scrape detailed product information from a product page."""
+    # ------------------------------------------------------------------
+    # Product detail parsing
+    # ------------------------------------------------------------------
+    def _parse_product_page(self, html: str) -> Optional[ProductDetails]:
+        """Parse a product detail page into structured information."""
 
-        response = self._fetch(url)
-        if not response:
+        root = parse_html(html)
+        product_block = root.find(class_="detailpage") or root
+        name_node = product_block.find(id_="product-title") or root.find(id_="product-title")
+        description_node = (
+            product_block.find(id_="product-details")
+            or root.find(id_="product-details")
+        )
+        if not name_node:
             return None
-
-        soup = BeautifulSoup(response.content, "html.parser")
-        
-        # Extract basic product information
-        description_elem = soup.select_one('div[class*="productdesc"] p')
-        description = description_elem.get_text(strip=True) if description_elem else None
-        
-        # Check for discontinued products
-        discontinued, replacement_url = self._check_discontinued_product(soup)
-        
-        # Extract product image URL
-        image_url = self._extract_product_image_url(soup)
-        
-        # Extract ingredients
-        ingredients = self._extract_ingredients(soup)
-        
-        # Extract ingredient functions
-        ingredient_functions = self._extract_ingredient_functions(soup)
-        
-        # Extract highlights
-        highlights = self._extract_product_highlights(soup)
-        
+        name = extract_text(name_node)
+        description = extract_text(description_node) if description_node else ""
+        image_url = self._extract_product_image(product_block)
+        tooltip_map = self._build_tooltip_index(root)
+        ingredients = self._extract_ingredients(root, tooltip_map)
+        ingredient_functions = self._extract_ingredient_functions(root)
+        highlights = self._extract_highlights(root, tooltip_map)
+        discontinued = bool(
+            root.find(class_="discontinued") or root.find(class_="product__discontinued")
+        )
+        replacement_anchor = root.find(class_="replacement-product")
+        replacement_product_url = None
+        if replacement_anchor and replacement_anchor.get("href"):
+            replacement_product_url = self._absolute_url(replacement_anchor.get("href"))
         return ProductDetails(
-            description=description,
-            discontinued=discontinued,
-            replacement_product_url=replacement_url,
+            name=name,
+            description=self._normalize_whitespace(description),
             image_url=image_url,
             ingredients=ingredients,
             ingredient_functions=ingredient_functions,
             highlights=highlights,
+            discontinued=discontinued,
+            replacement_product_url=replacement_product_url,
         )
 
-    def _extract_product_image_url(self, soup: BeautifulSoup) -> Optional[str]:
-        """Extract product image URL from the page."""
-        
-        # Try multiple selectors for product images
-        selectors = [
-            'img[class*="productimg"]',
-            'img[class*="product-image"]',
-            'div[class*="productimg"] img',
-            'div[class*="product-image"] img',
-            'img[alt*="product"]',
-            'img[src*="product"]'
+    def _extract_product_image(self, product_block: Node) -> Optional[str]:
+        """Return the hero image URL for the product if available."""
+
+        image_container = (
+            product_block.find(class_="product__image")
+            or product_block.find(id_="product-main-image")
+        )
+        if not image_container:
+            return None
+        img_tag = image_container.find(tag="img")
+        if not img_tag:
+            sources = image_container.find_all(tag="source")
+            for source in sources:
+                srcset = source.get("srcset")
+                if not srcset:
+                    continue
+                first_entry = srcset.split(",", 1)[0].strip().split(" ", 1)[0]
+                if first_entry:
+                    return self._absolute_url(first_entry)
+            return None
+        candidates = [
+            img_tag.get("src"),
+            img_tag.get("data-src"),
+            img_tag.get("data-original"),
+            img_tag.get("data-srcset"),
+            img_tag.get("srcset"),
         ]
-        
-        for selector in selectors:
-            img_elem = soup.select_one(selector)
-            if img_elem and img_elem.get('src'):
-                src = img_elem.get('src')
-                if src.startswith('//'):
-                    src = 'https:' + src
-                elif src.startswith('/'):
-                    src = self.base_url + src
-                return src
-        
+        for candidate in candidates:
+            if not candidate:
+                continue
+            value = candidate.strip()
+            if not value:
+                continue
+            if " " in value and "," in value:
+                first_entry = value.split(",", 1)[0]
+                value = first_entry.strip().split(" ", 1)[0]
+            elif " " in value and value.count("http") <= 1:
+                value = value.split(" ", 1)[0]
+            return self._absolute_url(value)
         return None
 
-    def _extract_ingredients(self, soup: BeautifulSoup) -> List[Ingredient]:
-        """Extract ingredient list from product page."""
-        
-        ingredients = []
-        
-        # Try multiple selectors for ingredient lists
-        selectors = [
-            'div[class*="ingredlist"]',
-            'div[class*="ingredient"]',
-            'div[class*="ingredients"]',
-            'ul[class*="ingredient"]',
-            'ol[class*="ingredient"]'
-        ]
-        
-        for selector in selectors:
-            ingredient_container = soup.select_one(selector)
-            if ingredient_container:
-                # Look for ingredient links
-                ingredient_links = ingredient_container.select('a[href*="/ingredients/"]')
-                
-                for link in ingredient_links:
-                    name = link.get_text(strip=True)
-                    url = link.get('href')
-                    
-                    if url and url.startswith('/'):
-                        url = self.base_url + url
-                    
-                    if name and url:
-                        ingredients.append(Ingredient(name=name, url=url))
-                
-                if ingredients:
-                    break
-        
+    def _build_tooltip_index(self, root: Node) -> Dict[str, Node]:
+        """Map tooltip identifiers to DOM nodes for quick lookup."""
+
+        tooltip_map: Dict[str, Node] = {}
+        for tooltip in root.find_all(class_="tooltip-content"):
+            tooltip_id = tooltip.get("id")
+            if tooltip_id:
+                tooltip_map[tooltip_id] = tooltip
+        return tooltip_map
+
+    def _extract_ingredients(
+        self, root: Node, tooltip_map: Dict[str, Node]
+    ) -> List[IngredientReference]:
+        """Collect ingredient references listed on the product page."""
+
+        container = root.find(id_="product-ingredients") or root
+        ingredients: List[IngredientReference] = []
+        for anchor in container.find_all(tag="a"):
+            if "ingred-link" not in anchor.classes():
+                continue
+            href = anchor.get("href")
+            name = extract_text(anchor)
+            if not href or not name:
+                continue
+            tooltip_text = None
+            tooltip_link = None
+            tooltip_id = None
+            tooltip_span = self._find_tooltip_anchor(anchor)
+            if tooltip_span:
+                tooltip_id_attr = tooltip_span.get("data-tooltip-content")
+                if tooltip_id_attr:
+                    tooltip_id = tooltip_id_attr.lstrip("#")
+            if tooltip_id and tooltip_id in tooltip_map:
+                tooltip_node = tooltip_map[tooltip_id]
+                tooltip_text = extract_text(tooltip_node)
+                link_node = tooltip_node.find(
+                    tag="a",
+                    predicate=lambda n: n.get("href", "").startswith("/ingredients/"),
+                )
+                if link_node and link_node.get("href"):
+                    tooltip_link = self._absolute_url(link_node.get("href"))
+            ingredients.append(
+                IngredientReference(
+                    name=name,
+                    url=self._absolute_url(href),
+                    tooltip_text=tooltip_text,
+                    tooltip_ingredient_link=tooltip_link,
+                )
+            )
         return ingredients
 
-    def _extract_ingredient_functions(self, soup: BeautifulSoup) -> List[str]:
-        """Extract ingredient functions from product page."""
-        
-        functions = []
-        
-        # Try multiple selectors for function information
-        selectors = [
-            'div[class*="function"]',
-            'span[class*="function"]',
-            'div[class*="ingredlist"] div[class*="function"]'
-        ]
-        
-        for selector in selectors:
-            function_elems = soup.select(selector)
-            for elem in function_elems:
-                text = elem.get_text(strip=True)
-                if text and 'function' in text.lower():
-                    functions.append(text)
-        
-        return functions
+    def _find_tooltip_anchor(self, node: Node) -> Optional[Node]:
+        """Locate the tooltip icon associated with ``node``."""
 
-    def _extract_product_highlights(self, soup: BeautifulSoup) -> List[str]:
-        """Extract product highlights from the page."""
-        
-        highlights = []
-        
-        # Try multiple selectors for highlights
-        selectors = [
-            'div[class*="highlight"]',
-            'div[class*="feature"]',
-            'ul[class*="highlight"]',
-            'ul[class*="feature"]'
-        ]
-        
-        for selector in selectors:
-            highlight_elems = soup.select(selector)
-            for elem in highlight_elems:
-                text = elem.get_text(strip=True)
+        current = node.parent
+        while current is not None:
+            tooltip = current.find(class_="info-circle-ingred-short")
+            if tooltip:
+                return tooltip
+            if current.tag == "li" or current.tag == "div":
+                break
+            current = current.parent
+        return node.parent.find(class_="info-circle-ingred-short") if node.parent else None
+
+    def _extract_ingredient_functions(self, root: Node) -> List[IngredientFunction]:
+        """Parse the ingredient function table displayed on the page."""
+
+        section = root.find(id_="ingredlist-table-section")
+        if not section:
+            return []
+        rows: List[IngredientFunction] = []
+        for tr in section.find_all(tag="tr"):
+            cells = [
+                child
+                for child in tr.children
+                if isinstance(child, Node) and child.tag == "td"
+            ]
+            if len(cells) < 2:
+                continue
+            ingred_cell, function_cell = cells[:2]
+            ingred_anchor = ingred_cell.find(
+                tag="a",
+                predicate=lambda n: n.get("href", "").startswith("/ingredients/"),
+            )
+            if not ingred_anchor:
+                continue
+            ingredient_name = extract_text(ingred_anchor)
+            ingredient_page = (
+                self._absolute_url(ingred_anchor.get("href"))
+                if ingred_anchor.get("href")
+                else None
+            )
+            what_it_does: List[str] = []
+            function_links: List[str] = []
+            for anchor in function_cell.find_all(tag="a"):
+                if "ingred-function-link" not in anchor.classes():
+                    continue
+                text = extract_text(anchor)
+                href = anchor.get("href")
                 if text:
-                    highlights.append(text)
-        
-        return highlights
+                    what_it_does.append(text)
+                if href:
+                    function_links.append(self._absolute_url(href))
+            rows.append(
+                IngredientFunction(
+                    ingredient_name=ingredient_name,
+                    ingredient_page=ingredient_page,
+                    what_it_does=what_it_does,
+                    function_links=function_links,
+                )
+            )
+        return rows
 
-    def _check_discontinued_product(self, soup: BeautifulSoup) -> Tuple[bool, Optional[str]]:
-        """Check if product is discontinued and extract replacement URL."""
-        
-        # Look for discontinued indicators
-        discontinued_indicators = [
-            'discontinued',
-            'no longer available',
-            'out of stock',
-            'unavailable'
-        ]
-        
-        page_text = soup.get_text().lower()
-        for indicator in discontinued_indicators:
-            if indicator in page_text:
-                # Look for replacement product link
-                replacement_link = soup.select_one('a[href*="/products/"]')
-                replacement_url = replacement_link.get('href') if replacement_link else None
-                return True, replacement_url
-        
-        return False, None
+    def _extract_highlights(
+        self, root: Node, tooltip_map: Dict[str, Node]
+    ) -> ProductHighlights:
+        """Collect highlight hashtags and ingredient groupings."""
 
-    def _store_product_details(self, product_id: str, details: ProductDetails, image_path: Optional[str] = None) -> None:
-        """Store product details in the database."""
-        
-        # Update product record with basic details
-        self.conn.execute(
+        section = root.find(id_="ingredlist-highlights-section")
+        free_tags: List[FreeTag] = []
+        key_entries: List[HighlightEntry] = []
+        other_entries: List[HighlightEntry] = []
+        if section:
+            for node in section.find_all(tag="span"):
+                if node.has_class("hashtag"):
+                    text = extract_text(node)
+                    if not text:
+                        continue
+                    tooltip_text = None
+                    tooltip_attr = node.get("data-tooltip-content")
+                    if tooltip_attr:
+                        tooltip_id = tooltip_attr.lstrip("#")
+                        tooltip_node = tooltip_map.get(tooltip_id)
+                        if tooltip_node:
+                            tooltip_text = self._normalize_whitespace(
+                                extract_text(tooltip_node)
+                            )
+                    free_tags.append(FreeTag(tag=text, tooltip=tooltip_text))
+            for block in section.find_all(tag="div"):
+                if not block.has_class("ingredlist-by-function-block"):
+                    continue
+                heading = block.find(tag="h3")
+                heading_text = extract_text(heading).lower() if heading else ""
+                target_list: Optional[List[HighlightEntry]] = None
+                if "key ingredients" in heading_text:
+                    target_list = key_entries
+                elif "other ingredients" in heading_text:
+                    target_list = other_entries
+                if target_list is None:
+                    continue
+                for span in block.find_all(tag="span"):
+                    ingred_anchor = span.find(
+                        tag="a",
+                        predicate=lambda n: "ingred-link" in n.classes(),
+                    )
+                    if not ingred_anchor:
+                        continue
+                    func_anchor = span.find(
+                        tag="a",
+                        predicate=lambda n: "func-link" in n.classes(),
+                    )
+                    target_list.append(
+                        HighlightEntry(
+                            function_name=extract_text(func_anchor) if func_anchor else None,
+                            function_link=self._absolute_url(func_anchor.get("href"))
+                            if func_anchor and func_anchor.get("href")
+                            else None,
+                            ingredient_name=extract_text(ingred_anchor),
+                            ingredient_page=self._absolute_url(ingred_anchor.get("href"))
+                            if ingred_anchor.get("href")
+                            else None,
+                        )
+                    )
+        return ProductHighlights(
+            free_tags=free_tags,
+            key_ingredients=key_entries,
+            other_ingredients=other_entries,
+        )
+
+    # ------------------------------------------------------------------
+    # Product detail persistence helpers
+    # ------------------------------------------------------------------
+    def _store_product_details(
+        self,
+        product_id: str,
+        details: ProductDetails,
+        image_path: Optional[str],
+    ) -> None:
+        """Persist the parsed product details and ingredient links."""
+
+        ingredient_ids: List[str] = []
+        ingredient_lookup_by_url: Dict[str, str] = {}
+        ingredient_lookup_by_name: Dict[str, str] = {}
+
+        def normalise_url(value: str) -> str:
+            return value.rstrip("/").lower()
+
+        for ingredient in details.ingredients:
+            ingredient_id = self._ensure_ingredient(ingredient)
+            ingredient.ingredient_id = ingredient_id
+            ingredient_ids.append(ingredient_id)
+            if ingredient.url:
+                ingredient_lookup_by_url[normalise_url(ingredient.url)] = ingredient_id
+            normalized_name = self._normalize_whitespace(ingredient.name).lower()
+            if normalized_name:
+                ingredient_lookup_by_name[normalized_name] = ingredient_id
+
+        ingredient_ids_json = json.dumps(
+            ingredient_ids,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+        def resolve_highlight_ids(entries: List[HighlightEntry]) -> List[str]:
+            resolved: List[str] = []
+            seen: Set[str] = set()
+            for entry in entries:
+                ingredient_id: Optional[str] = None
+                if entry.ingredient_page:
+                    lookup_key = normalise_url(entry.ingredient_page)
+                    ingredient_id = ingredient_lookup_by_url.get(lookup_key)
+                if not ingredient_id and entry.ingredient_name:
+                    name_key = self._normalize_whitespace(entry.ingredient_name).lower()
+                    ingredient_id = ingredient_lookup_by_name.get(name_key)
+                if ingredient_id and ingredient_id not in seen:
+                    resolved.append(ingredient_id)
+                    seen.add(ingredient_id)
+            return resolved
+
+        key_ingredient_ids_json = json.dumps(
+            resolve_highlight_ids(details.highlights.key_ingredients),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        other_ingredient_ids_json = json.dumps(
+            resolve_highlight_ids(details.highlights.other_ingredients),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        # Free tags no longer stored in database - frees table removed
+        free_tag_ids_json = "[]"
+        payload: Dict[str, object] = {
+            "name": details.name,
+            "description": details.description,
+            "image_path": image_path,
+            "ingredient_ids_json": ingredient_ids_json,
+            "key_ingredient_ids_json": key_ingredient_ids_json,
+            "other_ingredient_ids_json": other_ingredient_ids_json,
+            "free_tag_ids_json": free_tag_ids_json,
+            "discontinued": 1 if details.discontinued else 0,
+            "replacement_product_url": details.replacement_product_url,
+        }
+        existing = self.conn.execute(
             """
-            UPDATE products SET 
-                description = ?, 
-                discontinued = ?, 
-                replacement_product_url = ?,
-                image_path = ?,
-                last_updated_at = ?
+            SELECT name, description, image_path, ingredient_ids_json,
+                   key_ingredient_ids_json, other_ingredient_ids_json,
+                   free_tag_ids_json, discontinued, replacement_product_url,
+                   last_updated_at
+            FROM products
             WHERE id = ?
             """,
-            (
-                details.description,
-                1 if details.discontinued else 0,
-                details.replacement_product_url,
-                image_path,
-                self._current_timestamp(),
-                product_id,
-            ),
-        )
-        
-        # Process ingredients
-        ingredient_ids = []
-        for ingredient in details.ingredients:
-            ingredient_id = self._ensure_ingredient(ingredient.name, ingredient.url)
-            if ingredient_id:
-                ingredient_ids.append(ingredient_id)
-        
-        # Update product with ingredient IDs
-        if ingredient_ids:
-            self.conn.execute(
-                "UPDATE products SET ingredient_ids_json = ? WHERE id = ?",
-                (json.dumps(ingredient_ids), product_id),
-            )
-        
-        # Process ingredient functions
-        for func in details.ingredient_functions:
-            self._store_ingredient_function(func)
-        
-        # Process highlights
-        self._store_product_highlights(product_id, details.highlights)
-        
-        self.conn.commit()
-
-    def _ensure_ingredient(self, name: str, url: str) -> Optional[str]:
-        """Ensure ingredient exists in database and return its ID."""
-        
-        # Check if ingredient already exists
-        row = self.conn.execute(
-            "SELECT id FROM ingredients WHERE name = ? OR url = ?",
-            (name, url),
+            (product_id,),
         ).fetchone()
-        
-        if row:
-            return row["id"]
-        
-        # Create new ingredient
-        ingredient_id = self._generate_id()
         now = self._current_timestamp()
-        
-        # Scrape ingredient details
-        ingredient_details = self._scrape_ingredient_page(url, name)
-        
-        if ingredient_details:
-            # Store ingredient with details
+        if image_path is None and existing and existing["image_path"]:
+            payload["image_path"] = existing["image_path"]
+        if existing is None:
             self.conn.execute(
                 """
-                INSERT INTO ingredients (
-                    id, name, url, rating_tag, also_called, irritancy, comedogenicity,
-                    details_text, cosing_cas_numbers_json, cosing_ec_numbers_json,
-                    cosing_identified_ingredients_json, cosing_regulation_provisions_json,
-                    cosing_function_ids_json, quick_facts_json, proof_references_json,
-                    last_checked_at, last_updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                UPDATE products
+                SET name = :name,
+                    description = :description,
+                    image_path = :image_path,
+                    ingredient_ids_json = :ingredient_ids_json,
+                    key_ingredient_ids_json = :key_ingredient_ids_json,
+                    other_ingredient_ids_json = :other_ingredient_ids_json,
+                    free_tag_ids_json = :free_tag_ids_json,
+                    discontinued = :discontinued,
+                    replacement_product_url = :replacement_product_url,
+                    last_checked_at = :last_checked_at,
+                    last_updated_at = :last_updated_at
+                WHERE id = :product_id
                 """,
-                (
-                    ingredient_id, name, url, ingredient_details.rating_tag,
-                    json.dumps(ingredient_details.also_called),
-                    ingredient_details.irritancy, ingredient_details.comedogenicity,
-                    ingredient_details.details_text,
-                    json.dumps(ingredient_details.cosing_cas_numbers),
-                    json.dumps(ingredient_details.cosing_ec_numbers),
-                    json.dumps(ingredient_details.cosing_identified_ingredients),
-                    json.dumps(ingredient_details.cosing_regulation_provisions),
-                    json.dumps(ingredient_details.cosing_function_ids),
-                    json.dumps(ingredient_details.quick_facts),
-                    json.dumps(ingredient_details.proof_references),
-                    now, now
-                ),
+                {
+                    **payload,
+                    "product_id": product_id,
+                    "last_checked_at": now,
+                    "last_updated_at": now,
+                },
+            )
+            return
+
+        changed = False
+        for column, value in payload.items():
+            if existing[column] != value:
+                changed = True
+                break
+        if changed or not existing["last_updated_at"]:
+            update_values = {**payload, "last_checked_at": now, "last_updated_at": now}
+            assignments = ", ".join(f"{column} = ?" for column in update_values)
+            params = list(update_values.values()) + [product_id]
+            self.conn.execute(
+                f"UPDATE products SET {assignments} WHERE id = ?",
+                params,
             )
         else:
-            # Store ingredient without details
             self.conn.execute(
-                """
-                INSERT INTO ingredients (id, name, url, last_checked_at, last_updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                (ingredient_id, name, url, now, now),
+                "UPDATE products SET last_checked_at = ? WHERE id = ?",
+                (now, product_id),
             )
-        
-        self.conn.commit()
-        return ingredient_id
 
-    def _scrape_ingredient_page(self, url: str, ingredient_name: str) -> Optional[dict]:
-        """Scrape detailed ingredient information from ingredient page."""
-        
-        response = self._fetch(url)
-        if not response:
+    def _ensure_ingredient(self, ingredient: IngredientReference) -> str:
+        """Persist ingredient metadata and return the database identifier."""
+
+        if ingredient.tooltip_ingredient_link:
+            row = self.conn.execute(
+                "SELECT id FROM ingredients WHERE url = ?",
+                (ingredient.tooltip_ingredient_link,),
+            ).fetchone()
+            if row:
+                return str(row["id"])
+        row = self.conn.execute(
+            "SELECT id, details_text FROM ingredients WHERE url = ?",
+            (ingredient.url,),
+        ).fetchone()
+        if row and not self._is_placeholder_details(row["details_text"] or ""):
+            return str(row["id"])
+        if row:
+            LOGGER.debug(
+                "Previously stored placeholder for %s – retrying download", ingredient.url
+            )
+        try:
+            details = self._scrape_ingredient_page(ingredient.url)
+        except RuntimeError as exc:
+            LOGGER.error("Unable to download ingredient %s: %s", ingredient.url, exc)
+            if row:
+                return str(row["id"])
+            placeholder = self._build_placeholder_ingredient_details(ingredient, str(exc))
+            return self._store_ingredient_details(placeholder)
+        return self._store_ingredient_details(details)
+
+    # _ensure_free_tag method removed - frees table no longer exists
+
+    # ------------------------------------------------------------------
+    # Ingredient scraping & persistence
+    # ------------------------------------------------------------------
+    def _scrape_ingredient_page(self, url: str) -> IngredientDetails:
+        """Download and parse a single ingredient page."""
+
+        LOGGER.debug("Fetching ingredient details %s", url)
+        html = self._fetch_html(url, attempts=INGREDIENT_FETCH_ATTEMPTS)
+        if html is None:
+            raise RuntimeError(
+                f"Unable to download ingredient page {url} after {INGREDIENT_FETCH_ATTEMPTS} attempts"
+            )
+        return self._parse_ingredient_page(html, url)
+
+    @staticmethod
+    def _is_placeholder_details(details_text: str) -> bool:
+        """Return ``True`` when ``details_text`` represents a placeholder entry."""
+
+        return INGREDIENT_PLACEHOLDER_MARKER in details_text
+
+    def _build_placeholder_ingredient_details(
+        self, ingredient: IngredientReference, reason: str
+    ) -> IngredientDetails:
+        """Create an :class:`IngredientDetails` placeholder when downloads fail."""
+
+        tooltip_summary = (
+            self._normalize_whitespace(ingredient.tooltip_text)
+            if ingredient.tooltip_text
+            else None
+        )
+        reason_summary = (
+            self._normalize_whitespace(str(reason)) if reason else "Unknown error"
+        )
+        reason_summary = reason_summary[:300]
+        message_parts = [
+            "This ingredient record is a temporary placeholder because the source page could not be downloaded.",
+            f"Reason: {reason_summary}",
+            f"Marker: {INGREDIENT_PLACEHOLDER_MARKER}",
+        ]
+        if tooltip_summary:
+            message_parts.append(f"Tooltip excerpt: {tooltip_summary}")
+        details_text = "\n\n".join(message_parts)
+        return IngredientDetails(
+            name=ingredient.name,
+            url=ingredient.url,
+            rating_tag="",
+            also_called=[],
+            irritancy="",
+            comedogenicity="",
+            details_text=details_text,
+            cosing_cas_numbers=[],
+            cosing_ec_numbers=[],
+            cosing_identified_ingredients=[],
+            cosing_regulation_provisions=[],
+            cosing_function_infos=[],
+            quick_facts=[],
+            proof_references=[],
+        )
+
+    def _parse_ingredient_page(self, html: str, url: str) -> IngredientDetails:
+        """Convert ingredient HTML into a structured :class:`IngredientDetails`."""
+
+        root = parse_html(html)
+        name_node = root.find(tag="h1", class_="klavikab") or root.find(tag="h1")
+        rating_node = root.find(class_="ourtake")
+        name = extract_text(name_node)
+        rating_tag = extract_text(rating_node)
+        label_map = self._build_label_map(root)
+        also_called_node = label_map.get("also-called-like-this")
+        irritancy_node = label_map.get("irritancy")
+        comedogenicity_node = label_map.get("comedogenicity")
+        cosing_record = self._retrieve_cosing_data(name)
+        cosing_function_infos = [
+            IngredientFunctionInfo(name=fn, url=None, description="")
+            for fn in cosing_record.functions
+        ]
+        details_text = self._parse_details_text(root)
+        quick_facts = self._parse_quick_facts(root)
+        proof_references = self._parse_proof_references(root)
+        raw_also_called = extract_text(also_called_node) if also_called_node else ""
+        also_called_values: List[str] = []
+        if raw_also_called:
+            for part in re.split(r"[,;\n]", raw_also_called):
+                candidate = self._normalize_whitespace(part)
+                if candidate and candidate not in also_called_values:
+                    also_called_values.append(candidate)
+        return IngredientDetails(
+            name=name,
+            url=url,
+            rating_tag=rating_tag,
+            also_called=also_called_values,
+            irritancy=self._extract_label_text(irritancy_node),
+            comedogenicity=self._extract_label_text(comedogenicity_node),
+            details_text=details_text,
+            cosing_cas_numbers=cosing_record.cas_numbers,
+            cosing_ec_numbers=cosing_record.ec_numbers,
+            cosing_identified_ingredients=cosing_record.identified_ingredients,
+            cosing_regulation_provisions=cosing_record.regulation_provisions,
+            cosing_function_infos=cosing_function_infos,
+            quick_facts=quick_facts,
+            proof_references=proof_references,
+        )
+
+    def _retrieve_cosing_data(self, ingredient_name: str) -> CosIngRecord:
+        """Fetch CosIng data for ``ingredient_name`` from the official portal."""
+
+        ingredient_name = ingredient_name.strip()
+        if not ingredient_name:
+            return CosIngRecord()
+        lookup_key = self._cosing_cache_key(ingredient_name)
+        fetch_source = "miss"
+        start_time = time.perf_counter()
+        result: Optional[CosIngRecord] = None
+
+        if lookup_key:
+            cached_record = self._cosing_record_cache.get(lookup_key)
+            if cached_record is not None:
+                fetch_source = "memory"
+                result = cached_record
+        # Cache is now memory-only (LRU), no disk cache needed
+
+        if result is None:
+            for search_term in self._cosing_search_terms(ingredient_name):
+                detail_html = self._fetch_cosing_detail_via_playwright(
+                    search_term,
+                    original_name=ingredient_name,
+                )
+                if not detail_html:
+                    continue
+                try:
+                    result = self._parse_cosing_detail_page(detail_html)
+                except Exception:  # pragma: no cover - defensive parsing guard
+                    LOGGER.warning(
+                        "Failed to parse CosIng HTML for %s", ingredient_name, exc_info=True
+                    )
+                    continue
+                fetch_source = "network"
+                if lookup_key:
+                    # Store only in memory cache (LRU), no disk storage
+                    self._cosing_record_cache.put(lookup_key, result)
+                break
+
+        if result is None:
+            result = CosIngRecord()
+            if lookup_key:
+                # Store empty result in memory cache to avoid repeated failed lookups
+                self._cosing_record_cache.put(lookup_key, result)
+
+        elapsed = time.perf_counter() - start_time
+        LOGGER.debug(
+            "CosIng lookup for %s completed in %.2fs (%s)",
+            ingredient_name,
+            elapsed,
+            fetch_source,
+        )
+        return result
+
+    def _cosing_cache_key(self, ingredient_name: str) -> str:
+        """Normalise ingredient names so cache lookups remain stable."""
+
+        return self._cosing_lookup_key(ingredient_name)
+
+    # _load_cosing_cache_html method removed - now using memory-only LRU cache
+
+    # Cache methods removed - now using memory-only LRU cache
+
+    def _cosing_search_terms(self, ingredient_name: str) -> List[str]:
+        """Return CosIng search fallbacks for names with slash-separated variants."""
+
+        cleaned = ingredient_name.replace("\u200b", "").strip()
+        if not cleaned:
+            return []
+        terms: List[str] = []
+        if "/" in cleaned:
+            for part in cleaned.split("/"):
+                normalised = self._normalize_whitespace(part)
+                if normalised and normalised not in terms:
+                    terms.append(normalised)
+        full_name = self._normalize_whitespace(cleaned)
+        if full_name and full_name not in terms:
+            terms.append(full_name)
+        return terms
+
+    def _fetch_cosing_detail_via_playwright(
+        self,
+        search_term: str,
+        *,
+        original_name: Optional[str] = None,
+    ) -> Optional[str]:
+        """Drive the CosIng interface with Playwright and return detail HTML."""
+
+        page = self._get_cosing_playwright_page()
+        if page is None:
             return None
-
-        soup = BeautifulSoup(response.content, "html.parser")
-        
-        # Extract rating tag
-        rating_elem = soup.select_one('span[class*="rating"]')
-        rating_tag = rating_elem.get_text(strip=True) if rating_elem else None
-        
-        # Extract "also called" information
-        also_called = []
-        also_called_elem = soup.select_one('div[class*="alsocalled"]')
-        if also_called_elem:
-            also_called_links = also_called_elem.select('a')
-            for link in also_called_links:
-                name = link.get_text(strip=True)
-                if name:
-                    also_called.append(name)
-        
-        # Extract irritancy and comedogenicity
-        irritancy = None
-        comedogenicity = None
-        
-        irritancy_elem = soup.select_one('span[class*="irritancy"]')
-        if irritancy_elem:
-            irritancy = irritancy_elem.get_text(strip=True)
-        
-        comedogenicity_elem = soup.select_one('span[class*="comedogenicity"]')
-        if comedogenicity_elem:
-            comedogenicity = comedogenicity_elem.get_text(strip=True)
-        
-        # Extract detailed text
-        details_elem = soup.select_one('div[class*="ingreddesc"]')
-        details_text = details_elem.get_text(strip=True) if details_elem else None
-        
-        # Extract CosIng data
-        cosing_data = self._retrieve_cosing_data(ingredient_name)
-        
-        return {
-            'rating_tag': rating_tag,
-            'also_called': also_called,
-            'irritancy': irritancy,
-            'comedogenicity': comedogenicity,
-            'details_text': details_text,
-            'cosing_cas_numbers': cosing_data.get('cas_numbers', []),
-            'cosing_ec_numbers': cosing_data.get('ec_numbers', []),
-            'cosing_identified_ingredients': cosing_data.get('identified_ingredients', []),
-            'cosing_regulation_provisions': cosing_data.get('regulation_provisions', []),
-            'cosing_function_ids': cosing_data.get('function_ids', []),
-            'quick_facts': cosing_data.get('quick_facts', []),
-            'proof_references': cosing_data.get('proof_references', []),
-        }
-
-    def _retrieve_cosing_data(self, ingredient_name: str) -> dict:
-        """Retrieve CosIng data for an ingredient using optimized approach."""
-        
-        # Check cache first
-        cached_data = self._cosing_record_cache.get(ingredient_name)
-        if cached_data:
-            LOGGER.debug(f"CosIng cache hit for {ingredient_name}")
-            return cached_data
-        
-        LOGGER.debug(f"CosIng cache miss for {ingredient_name}, fetching from web")
-        
-        # Try optimized CosIng scraping
-        cosing_data = self._fetch_cosing_detail_optimized(ingredient_name)
-        
-        if cosing_data:
-            # Cache the result
-            self._cosing_record_cache.put(ingredient_name, cosing_data)
-            return cosing_data
-        
-        return {
-            'cas_numbers': [],
-            'ec_numbers': [],
-            'identified_ingredients': [],
-            'regulation_provisions': [],
-            'function_ids': [],
-            'quick_facts': [],
-            'proof_references': []
-        }
-
-    def _fetch_cosing_detail_optimized(self, ingredient_name: str) -> Optional[dict]:
-        """Optimized CosIng detail fetching with smart fallback strategy."""
-        
-        # First try: Regular Playwright (3s timeout)
+        query = search_term.strip()
+        if not query:
+            return None
+        display_name = original_name or query
+        base_url = COSING_BASE_URL if COSING_BASE_URL.endswith("/") else f"{COSING_BASE_URL}/"
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-                
-                # Set shorter timeouts for faster failure
-                page.set_default_timeout(3000)
-                
-                # Try direct URL first
-                direct_url = self._try_direct_cosing_url(ingredient_name)
-                if direct_url:
-                    try:
-                        page.goto(direct_url, timeout=3000)
-                        page.wait_for_load_state('domcontentloaded', timeout=3000)
-                        
-                        # Quick check if page loaded successfully
-                        if self._wait_for_cosing_dynamic_content(page, timeout=2000):
-                            cosing_data = self._extract_cosing_data_from_page(page)
-                            if cosing_data:
-                                browser.close()
-                                return cosing_data
-                    except Exception as e:
-                        LOGGER.debug(f"Direct URL failed for {ingredient_name}: {e}")
-                
-                browser.close()
-        except Exception as e:
-            LOGGER.debug(f"Regular Playwright failed for {ingredient_name}: {e}")
-        
-        # Second try: Optimized Playwright (20s timeout)
+            page.goto(base_url, wait_until="domcontentloaded", timeout=15000)
+        except PlaywrightTimeoutError:
+            LOGGER.warning(
+                "Timed out while loading CosIng search page for %s", display_name
+            )
+            return None
+        except PlaywrightError:
+            LOGGER.warning(
+                "Failed to load CosIng search page for %s", display_name, exc_info=True
+            )
+            return None
         try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch(headless=True)
-                page = browser.new_page()
-                
-                # Set longer timeout for search-based approach
-                page.set_default_timeout(20000)
-                
-                # Try search-based approach
-                search_url = f"https://ec.europa.eu/growth/tools-databases/cosing/search"
-                page.goto(search_url, timeout=10000)
-                page.wait_for_load_state('domcontentloaded', timeout=10000)
-                
-                # Wait for search form to be ready
-                page.wait_for_selector('input[name="search_term"]', timeout=10000)
-                
-                # Fill search form
-                page.fill('input[name="search_term"]', ingredient_name)
-                page.click('button[type="submit"]')
-                
-                # Wait for results
-                page.wait_for_load_state('networkidle', timeout=10000)
-                
-                if self._wait_for_cosing_dynamic_content(page, timeout=5000):
-                    cosing_data = self._extract_cosing_data_from_page(page)
-                    if cosing_data:
-                        browser.close()
-                        return cosing_data
-                
-                browser.close()
-        except Exception as e:
-            LOGGER.debug(f"Optimized Playwright failed for {ingredient_name}: {e}")
-        
-        return None
-
-    def _try_direct_cosing_url(self, ingredient_name: str) -> Optional[str]:
-        """Try to construct direct CosIng URL using search-based approach."""
-        
-        # Clean ingredient name for URL
-        clean_name = ingredient_name.lower().replace(' ', '-').replace('/', '-')
-        
-        # Try common CosIng URL patterns
-        possible_urls = [
-            f"https://ec.europa.eu/growth/tools-databases/cosing/search?search_term={clean_name}",
-            f"https://ec.europa.eu/growth/tools-databases/cosing/search?search_term={ingredient_name}",
-        ]
-        
-        return possible_urls[0]  # Return first option for now
-
-    def _fetch_cosing_detail_via_playwright_optimized(self, ingredient_name: str, page) -> Optional[dict]:
-        """Optimized Playwright-based CosIng detail fetching."""
-        
+            input_locator = page.locator("input#keyword")
+            input_locator.wait_for(state="visible", timeout=5000)
+            input_locator.fill(query)
+        except PlaywrightError as exc:
+            LOGGER.warning(
+                "Unable to populate CosIng search input for %s: %s", display_name, exc
+            )
+            return None
         try:
-            # Try direct URL first
-            direct_url = self._try_direct_cosing_url(ingredient_name)
-            if direct_url:
-                page.goto(direct_url, timeout=5000)
-                page.wait_for_load_state('domcontentloaded', timeout=5000)
-                
-                if self._wait_for_cosing_dynamic_content(page, timeout=3000):
-                    return self._extract_cosing_data_from_page(page)
-            
-            # Fallback to search
-            search_url = "https://ec.europa.eu/growth/tools-databases/cosing/search"
-            page.goto(search_url, timeout=5000)
-            page.wait_for_load_state('domcontentloaded', timeout=5000)
-            
-            # Wait for search form
-            page.wait_for_selector('input[name="search_term"]', timeout=5000)
-            
-            # Fill and submit search
-            page.fill('input[name="search_term"]', ingredient_name)
-            page.click('button[type="submit"]')
-            
-            # Wait for results
-            page.wait_for_load_state('networkidle', timeout=10000)
-            
-            if self._wait_for_cosing_dynamic_content(page, timeout=5000):
-                return self._extract_cosing_data_from_page(page)
-            
-        except Exception as e:
-            LOGGER.debug(f"Optimized Playwright failed for {ingredient_name}: {e}")
-        
-        return None
-
-    def _wait_for_cosing_dynamic_content(self, page, timeout: int = 5000) -> bool:
-        """Wait for CosIng dynamic content to load with multiple selector attempts."""
-        
-        selectors_to_try = [
-            '.search-results',
-            '.result-item',
-            '[class*="result"]',
-            '[class*="search"]',
-            'table',
-            '.content'
-        ]
-        
-        timeout_per_selector = timeout // len(selectors_to_try)
-        
-        for selector in selectors_to_try:
+            button_locator = page.locator("button.ecl-button--primary[type=submit]")
+            if button_locator.count() == 0:
+                button_locator = page.locator("button[type=submit]")
+            button_locator.first.click()
+        except PlaywrightError as exc:
+            LOGGER.warning(
+                "Unable to submit CosIng search for %s: %s", display_name, exc
+            )
+            return None
+        try:
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except PlaywrightTimeoutError:
             try:
-                page.wait_for_selector(selector, timeout=timeout_per_selector)
-                return True
-            except:
-                continue
-        
+                page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except PlaywrightTimeoutError:
+                LOGGER.debug("CosIng search results did not reach idle state", exc_info=True)
+        self._wait_for_cosing_dynamic_content(page)
+        html = page.content()
+        root = parse_html(html)
+        if self._is_cosing_detail_page(root):
+            return html
+        expected_name = None
+        if original_name:
+            expected_name = self._normalize_whitespace(original_name)
+            if "/" not in original_name:
+                expected_name = None
+        anchor = self._find_cosing_result_anchor(
+            root,
+            query,
+            expected_name=expected_name,
+        )
+        if anchor is None:
+            return None
+        href = anchor.get("href")
+        if not href:
+            return None
+        try:
+            locator = page.locator(f"a[href='{href}']")
+            if locator.count() == 0:
+                absolute_href = self._cosing_absolute_url(href)
+                locator = page.locator(f"a[href='{absolute_href}']")
+            if locator.count() == 0:
+                return None
+            locator.first.click()
+        except PlaywrightError as exc:
+            LOGGER.warning(
+                "Failed to open CosIng search result %s for %s: %s",
+                href,
+                display_name,
+                exc,
+            )
+            return None
+        try:
+            page.wait_for_load_state("networkidle", timeout=15000)
+        except PlaywrightTimeoutError:
+            try:
+                page.wait_for_load_state("domcontentloaded", timeout=5000)
+            except PlaywrightTimeoutError:
+                LOGGER.debug("CosIng detail page did not reach idle state", exc_info=True)
+        self._wait_for_cosing_dynamic_content(page)
+        detail_html = page.content()
+        detail_root = parse_html(detail_html)
+        if self._is_cosing_detail_page(detail_root):
+            return detail_html
+        return None
+
+    def _wait_for_cosing_dynamic_content(self, page: Any, *, timeout: int = 15000) -> bool:
+        """Wait until CosIng renders either the search results or detail table."""
+
+        if page is None:
+            return False
+        selector = (
+            "app-detail-subs table.ecl-table, "
+            "app-results-subs table.ecl-table, "
+            "table.ecl-table"
+        )
+        try:
+            page.wait_for_selector(selector, timeout=timeout)
+            return True
+        except PlaywrightTimeoutError:
+            LOGGER.debug("Timed out waiting for CosIng dynamic content", exc_info=True)
+        except PlaywrightError:
+            LOGGER.debug("Error waiting for CosIng dynamic content", exc_info=True)
         return False
 
-    def _extract_cosing_data_from_page(self, page) -> Optional[dict]:
-        """Extract CosIng data from the current page."""
-        
+    def _get_cosing_playwright_page(self) -> Optional[Any]:
+        """Lazily initialise the shared Playwright browser instance."""
+
+        if self._cosing_playwright_failed:
+            return None
+        if self._cosing_page is not None:
+            return self._cosing_page
+        if sync_playwright is None:
+            LOGGER.debug("Playwright not available – skipping CosIng scraping")
+            self._cosing_playwright_failed = True
+            return None
         try:
-            # Extract CAS numbers
-            cas_numbers = []
-            cas_elements = page.query_selector_all('[data-cas], .cas-number, [class*="cas"]')
-            for elem in cas_elements:
-                cas_text = elem.inner_text().strip()
-                if cas_text and 'cas' in cas_text.lower():
-                    cas_numbers.append(cas_text)
-            
-            # Extract EC numbers
-            ec_numbers = []
-            ec_elements = page.query_selector_all('[data-ec], .ec-number, [class*="ec"]')
-            for elem in ec_elements:
-                ec_text = elem.inner_text().strip()
-                if ec_text and 'ec' in ec_text.lower():
-                    ec_numbers.append(ec_text)
-            
-            # Extract identified ingredients
-            identified_ingredients = []
-            ingredient_elements = page.query_selector_all('[class*="ingredient"], [class*="substance"]')
-            for elem in ingredient_elements:
-                ingredient_text = elem.inner_text().strip()
-                if ingredient_text:
-                    identified_ingredients.append(ingredient_text)
-            
-            # Extract regulation provisions
-            regulation_provisions = []
-            regulation_elements = page.query_selector_all('[class*="regulation"], [class*="provision"]')
-            for elem in regulation_elements:
-                regulation_text = elem.inner_text().strip()
-                if regulation_text:
-                    regulation_provisions.append(regulation_text)
-            
-            # Extract function IDs
-            function_ids = []
-            function_elements = page.query_selector_all('[class*="function"], [data-function]')
-            for elem in function_elements:
-                function_text = elem.inner_text().strip()
-                if function_text:
-                    function_ids.append(function_text)
-            
-            return {
-                'cas_numbers': cas_numbers,
-                'ec_numbers': ec_numbers,
-                'identified_ingredients': identified_ingredients,
-                'regulation_provisions': regulation_provisions,
-                'function_ids': function_ids,
-                'quick_facts': [],
-                'proof_references': []
-            }
-            
-        except Exception as e:
-            LOGGER.debug(f"Failed to extract CosIng data: {e}")
+            self._cosing_playwright = sync_playwright().start()
+            # Optimize browser launch for performance
+            self._cosing_browser = self._cosing_playwright.chromium.launch(
+                headless=True,
+                args=[
+                    '--no-sandbox',
+                    '--disable-dev-shm-usage',
+                    '--disable-gpu',
+                    '--disable-images',  # Skip loading images for faster page loads
+                    '--disable-javascript',  # CosIng doesn't need JS for basic search
+                ]
+            )
+            # Create context with optimized settings
+            self._cosing_context = self._cosing_browser.new_context(
+                user_agent="INCIScraper/1.0 (+https://incidecoder.com)",
+                viewport={'width': 1280, 'height': 720},
+                ignore_https_errors=True,
+            )
+            self._cosing_page = self._cosing_context.new_page()
+            # Set shorter timeouts for faster failure detection
+            self._cosing_page.set_default_timeout(10000)  # 10 seconds instead of default 30
+            return self._cosing_page
+        except PlaywrightError:
+            LOGGER.warning("Unable to initialise Playwright – CosIng scraping disabled", exc_info=True)
+            self._cosing_playwright_failed = True
             return None
 
-    def _store_ingredient_function(self, function: str) -> None:
-        """Store ingredient function in database."""
-        
-        # Check if function already exists
-        existing = self.conn.execute(
-            "SELECT id FROM functions WHERE name = ?",
-            (function,),
-        ).fetchone()
-        
-        if existing:
-            return
-        
-        # Create new function
-        function_id = self._generate_id()
-        now = self._current_timestamp()
-        
-        self.conn.execute(
-            """
-            INSERT INTO functions (id, name, last_updated_at)
-            VALUES (?, ?, ?)
-            """,
-            (function_id, function, now),
-        )
-        self.conn.commit()
+    def _find_cosing_result_anchor(
+        self,
+        root: Node,
+        ingredient_name: str,
+        *,
+        expected_name: Optional[str] = None,
+    ) -> Optional[Node]:
+        """Choose the most likely search result for ``ingredient_name``."""
 
-    def _store_product_highlights(self, product_id: str, highlights: List[str]) -> None:
-        """Store product highlights in database."""
-        
-        if not highlights:
-            return
-        
-        # Delete existing highlights
-        self.conn.execute(
-            "DELETE FROM product_highlights WHERE product_id = ?",
-            (product_id,),
+        table = root.find(tag="table", class_="ecl-table")
+        if not table:
+            return None
+        search_name = ingredient_name.strip()
+        if not search_name:
+            return None
+        target_key = self._cosing_lookup_key(search_name)
+        query_words = self._cosing_lookup_words(search_name)
+        expected_key = (
+            self._cosing_lookup_key(expected_name)
+            if expected_name
+            else ""
         )
-        
-        # Insert new highlights
-        for highlight in highlights:
-            highlight_id = self._generate_id()
-            now = self._current_timestamp()
-            
-            self.conn.execute(
-                """
-                INSERT INTO product_highlights (id, product_id, highlight_text, last_updated_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (highlight_id, product_id, highlight, now),
+        expected_words = (
+            self._cosing_lookup_words(expected_name)
+            if expected_name
+            else set()
+        )
+        best_rank: Tuple[int, int] = (4, 0)
+        best_anchor: Optional[Node] = None
+        exact_target_rank: Tuple[int, int] = (4, 0)
+        exact_target_anchor: Optional[Node] = None
+        for index, anchor in enumerate(table.find_all(tag="a")):
+            href = anchor.get("href")
+            if not href:
+                continue
+            anchor_text = self._normalize_whitespace(extract_text(anchor))
+            if not anchor_text:
+                if best_anchor is None:
+                    best_rank = (3, index)
+                    best_anchor = anchor
+                continue
+            anchor_key = self._cosing_lookup_key(anchor_text)
+            row_node = anchor
+            while row_node and row_node.tag != "tr":
+                row_node = row_node.parent
+            row_text = (
+                self._normalize_whitespace(extract_text(row_node))
+                if row_node
+                else anchor_text
             )
-        
-        self.conn.commit()
+            row_key = self._cosing_lookup_key(row_text)
+            anchor_words = self._cosing_lookup_words(anchor_text)
+            row_words = self._cosing_lookup_words(row_text)
+            if expected_key:
+                if anchor_key == expected_key or row_key == expected_key:
+                    return anchor
+            if anchor_key == target_key or row_key == target_key:
+                if not expected_key:
+                    return anchor
+                target_exact_match = True
+            else:
+                target_exact_match = False
+            if expected_words and (
+                expected_words.issubset(anchor_words)
+                or expected_words.issubset(row_words)
+            ):
+                return anchor
+            match_type = 3
+            match_score = index
+            if target_key and (
+                target_key in anchor_key or target_key in row_key
+            ):
+                match_type = 1
+                container_length = (
+                    len(anchor_key)
+                    if target_key in anchor_key
+                    else len(row_key)
+                )
+                match_score = max(container_length - len(target_key), 0)
+            else:
+                candidate_scores: List[int] = []
+                if query_words and query_words.issubset(anchor_words):
+                    candidate_scores.append(len(anchor_words) - len(query_words))
+                if query_words and query_words.issubset(row_words):
+                    candidate_scores.append(len(row_words) - len(query_words))
+                if candidate_scores:
+                    match_type = 2
+                    match_score = min(candidate_scores)
+            if target_exact_match:
+                target_rank = (0, match_score)
+                if (
+                    exact_target_anchor is None
+                    or target_rank < exact_target_rank
+                ):
+                    exact_target_rank = target_rank
+                    exact_target_anchor = anchor
+            if best_anchor is None or (match_type, match_score) < best_rank:
+                best_rank = (match_type, match_score)
+                best_anchor = anchor
+        if expected_key and exact_target_anchor is not None:
+            return exact_target_anchor
+        return best_anchor
 
-    def _log_progress(self, stage: str, processed: int, total: int) -> None:
-        """Log progress for a specific stage."""
-        
-        percentage = (processed / total) * 100 if total > 0 else 0
-        LOGGER.info(
-            "%s progress: %s/%s (%.1f%%)",
-            stage, processed, total, percentage
-        )
+    def _is_cosing_detail_page(self, root: Node) -> bool:
+        """Determine whether ``root`` already represents a CosIng detail page."""
 
+        for cell in root.find_all(tag="td"):
+            text = self._normalize_whitespace(extract_text(cell)).lower()
+            if text == "inci name":
+                return True
+        return False
 
-# Add missing import
-import logging
+    def _parse_cosing_detail_page(self, html: str) -> CosIngRecord:
+        """Parse the CosIng detail HTML page into a :class:`CosIngRecord`."""
+
+        root = parse_html(html)
+        table_body = root.find(tag="tbody")
+        if not table_body:
+            return CosIngRecord()
+        record = CosIngRecord()
+        for row in table_body.find_all(tag="tr"):
+            cells = [
+                child
+                for child in row.children
+                if isinstance(child, Node) and child.tag == "td"
+            ]
+            if len(cells) < 2:
+                continue
+            label = self._normalize_whitespace(extract_text(cells[0])).lower()
+            value_node = cells[1]
+            if label == "cas #":
+                record.cas_numbers = self._extract_cosing_values(
+                    value_node, split_commas=True
+                )
+            elif label == "ec #":
+                record.ec_numbers = self._extract_cosing_values(
+                    value_node, split_commas=True
+                )
+            elif label.startswith("identified ingredients"):
+                record.identified_ingredients = self._extract_cosing_values(
+                    value_node, split_commas=True
+                )
+            elif label.startswith("cosmetics regulation provisions"):
+                record.regulation_provisions = self._extract_cosing_values(
+                    value_node,
+                    split_commas=False,
+                    split_slashes=False,
+                    split_semicolons=False,
+                )
+                if record.regulation_provisions:
+                    if len(record.regulation_provisions) == 1:
+                        single_value = record.regulation_provisions[0]
+                        if re.fullmatch(r"[A-Z0-9/\s,;-]+", single_value):
+                            parts = [
+                                part.strip()
+                                for part in re.split(
+                                    r"\s+/\s+|,\s*|;\s*",
+                                    single_value,
+                                )
+                                if part.strip()
+                            ]
+                            if parts and len(parts) > 1:
+                                record.regulation_provisions = parts
+            elif label == "functions":
+                record.functions = [
+                    self._normalise_cosing_function_name(value)
+                    for value in self._extract_cosing_values(
+                        value_node, split_commas=True
+                    )
+                ]
+        return record
+
+    def _extract_cosing_values(
+        self,
+        node: Node,
+        *,
+        split_commas: bool = False,
+        split_slashes: bool = True,
+        split_semicolons: bool = True,
+    ) -> List[str]:
+        """Normalise a CosIng table value into a list of strings."""
+
+        items: List[str] = []
+        list_container = node.find(tag="ul")
+        if list_container:
+            for li in list_container.find_all(tag="li"):
+                text = self._normalize_whitespace(extract_text(li))
+                if text:
+                    items.append(text)
+        else:
+            raw_text = self._normalize_whitespace(extract_text(node))
+            if raw_text:
+                pattern_parts: List[str] = []
+                if split_slashes:
+                    pattern_parts.append(r"\s*/\s*")
+                if split_commas:
+                    pattern_parts.append(r",\s*")
+                if split_semicolons:
+                    pattern_parts.append(r";\s*")
+                if pattern_parts:
+                    pattern = "|".join(pattern_parts)
+                    fragments = re.split(pattern, raw_text)
+                else:
+                    fragments = [raw_text]
+                for part in fragments:
+                    value = part.strip()
+                    if value:
+                        items.append(value)
+        unique_items: List[str] = []
+        seen: Set[str] = set()
+        for item in items:
+            key = item.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_items.append(item)
+        return unique_items
+
+    def _normalise_cosing_function_name(self, value: str) -> str:
+        """Return the CosIng function name with each word capitalised."""
+
+        parts = re.split(r"(\W+)", value.strip())
+        normalised: List[str] = []
+        for part in parts:
+            if not part:
+                continue
+            if part.isalpha():
+                normalised.append(part[0].upper() + part[1:].lower())
+            else:
+                normalised.append(part)
+        formatted = "".join(normalised)
+        return formatted or value.strip()
+
+    def _cosing_absolute_url(self, href: str) -> str:
+        """Convert relative CosIng links to absolute URLs."""
+
+        if href.startswith("http://") or href.startswith("https://"):
+            return href
+        base = COSING_BASE_URL if COSING_BASE_URL.endswith("/") else f"{COSING_BASE_URL}/"
+        return parse.urljoin(base, href)
+
+    def _cosing_lookup_key(self, value: str) -> str:
+        """Return a simplified representation suitable for equality checks."""
+
+        normalized = unicodedata.normalize("NFKC", value)
+        simplified = re.sub(r"[^0-9a-z]+", "", normalized.lower())
+        return simplified
+
+    def _cosing_lookup_words(self, value: str) -> Set[str]:
+        """Break a CosIng label into comparable lowercase tokens."""
+
+        normalized = unicodedata.normalize("NFKC", value)
+        tokens = re.split(r"[^0-9a-z]+", normalized.lower())
+        return {token for token in tokens if token}
+
+    def _build_label_map(self, root: Node) -> Dict[str, Node]:
+        """Associate label slugs with their corresponding value nodes."""
+
+        label_map: Dict[str, Node] = {}
+
+        def register(label_node: Optional[Node], value_node: Optional[Node]) -> None:
+            if not label_node or not value_node:
+                return
+            label_text = self._normalize_whitespace(extract_text(label_node))
+            if not label_text:
+                return
+            slug = label_text.lower().rstrip(":")
+            slug = slug.replace(":", "")
+            slug = slug.replace(" ", "-")
+            if slug:
+                label_map[slug] = value_node
+
+        # Newer markup renders metadata rows with generic ``itemprop`` containers.
+        for container in root.find_all(class_="itemprop"):
+            label_node = container.find(class_="label")
+            value_node = container.find(class_="value")
+            if not value_node:
+                value_node = self._find_value_node(label_node)
+            register(label_node, value_node or container)
+
+        # Legacy markup used a dedicated BEM style grid.
+        for row in root.find_all(class_="ingredient-overview__row"):
+            label_node = row.find(class_="ingredient-overview__row-title")
+            value_node = row.find(class_="ingredient-overview__row-content")
+            register(label_node, value_node or row)
+        return label_map
+
+    def _find_value_node(self, label_node: Node) -> Optional[Node]:
+        """Return the sibling value node of ``label_node`` if present."""
+
+        parent = getattr(label_node, "parent", None)
+        if not parent:
+            return None
+        for child in getattr(parent, "children", []):
+            if isinstance(child, Node) and child.has_class("value"):
+                return child
+        for child in parent.children:
+            if isinstance(child, Node) and child is not label_node:
+                return child
+        return None
+
+    def _extract_label_text(self, node: Optional[Node]) -> str:
+        """Return the textual content of a label field."""
+
+        if node is None:
+            return ""
+        target = node
+        if isinstance(node, Node) and not node.has_class("value"):
+            value_node = self._find_value_node(node)
+            if value_node is None:
+                return ""
+            target = value_node
+        return self._normalize_whitespace(extract_text(target))
+
+    def _parse_details_text(self, root: Node) -> str:
+        """Return the prose detail block as a clean string."""
+
+        content_node = root.find(id_="details-text")
+        if not content_node:
+            details_section = root.find(id_="details")
+            if details_section:
+                content_node = details_section.find(class_="content") or details_section
+        if not content_node:
+            content_node = root.find(class_="detailmore")
+        if not content_node:
+            return ""
+        blocks: List[str] = []
+
+        def visit(node: Node) -> None:
+            for item in node.children:
+                if isinstance(item, str):
+                    text = self._normalize_whitespace(item)
+                    if text:
+                        blocks.append(text)
+                    continue
+                if not isinstance(item, Node):
+                    continue
+                if item.tag == "p":
+                    text = self._normalize_whitespace(extract_text(item))
+                    if text:
+                        blocks.append(text)
+                    continue
+                if item.has_class("showmore-link"):
+                    continue
+                if item.tag in {"ul", "ol"}:
+                    entries: List[str] = []
+                    for child in item.children:
+                        if isinstance(child, Node) and child.tag == "li":
+                            text = self._normalize_whitespace(extract_text(child))
+                            if text:
+                                entries.append(f"- {text}")
+                    if entries:
+                        blocks.append("\n".join(entries))
+                    continue
+                visit(item)
+
+        visit(content_node)
+        if not blocks:
+            text = self._normalize_whitespace(extract_text(content_node))
+            return text
+        return "\n\n".join(blocks)
+
+    def _parse_quick_facts(self, root: Node) -> List[str]:
+        """Return the bullet point quick facts section as a list of strings."""
+
+        section = root.find(id_="quickfacts")
+        if not section:
+            return []
+        facts: List[str] = []
+        for item in section.find_all(tag="li"):
+            text = self._normalize_whitespace(extract_text(item))
+            if text:
+                facts.append(text)
+        return facts
+
+    def _parse_proof_references(self, root: Node) -> List[str]:
+        """Collect the bibliography style entries from the proof section."""
+
+        section = root.find(id_="proof")
+        if not section:
+            return []
+        references: List[str] = []
+        for item in section.find_all(tag="li"):
+            text = self._normalize_whitespace(extract_text(item))
+            if text:
+                references.append(text)
+        return references
+
+    def _store_ingredient_details(self, details: IngredientDetails) -> str:
+        """Persist ingredient metadata and return the database identifier."""
+
+        cosing_function_ids: List[str] = []
+        for function in details.cosing_function_infos:
+            function_id = self._ensure_ingredient_function(function)
+            if function_id is not None:
+                cosing_function_ids.append(function_id)
+        payload: Dict[str, object] = {
+            "name": details.name,
+            "rating_tag": details.rating_tag,
+            "also_called": json.dumps(
+                details.also_called,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "cosing_function_ids_json": json.dumps(
+                cosing_function_ids,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "irritancy": details.irritancy,
+            "comedogenicity": details.comedogenicity,
+            "details_text": details.details_text,
+            "cosing_cas_numbers_json": json.dumps(
+                details.cosing_cas_numbers,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "cosing_ec_numbers_json": json.dumps(
+                details.cosing_ec_numbers,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "cosing_identified_ingredients_json": json.dumps(
+                details.cosing_identified_ingredients,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "cosing_regulation_provisions_json": json.dumps(
+                details.cosing_regulation_provisions,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "quick_facts_json": json.dumps(
+                details.quick_facts,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            "proof_references_json": json.dumps(
+                details.proof_references,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        }
+        existing = self.conn.execute(
+            """
+            SELECT id, name, rating_tag, also_called, cosing_function_ids_json,
+                   irritancy, comedogenicity, details_text, cosing_cas_numbers_json,
+                   cosing_ec_numbers_json, cosing_identified_ingredients_json,
+                   cosing_regulation_provisions_json, quick_facts_json,
+                   proof_references_json, last_updated_at
+            FROM ingredients
+            WHERE url = ?
+            """,
+            (details.url,),
+        ).fetchone()
+        now = self._current_timestamp()
+        result_id: Optional[str]
+        if existing is None:
+            while True:
+                ingredient_id = self._generate_id()
+                try:
+                    self.conn.execute(
+                        """
+                        INSERT INTO ingredients (
+                            id, name, url, rating_tag, also_called, cosing_function_ids_json,
+                            irritancy, comedogenicity, details_text, cosing_cas_numbers_json,
+                            cosing_ec_numbers_json, cosing_identified_ingredients_json,
+                            cosing_regulation_provisions_json, quick_facts_json,
+                            proof_references_json, last_checked_at, last_updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            ingredient_id,
+                            details.name,
+                            details.url,
+                            details.rating_tag,
+                            payload["also_called"],
+                            payload["cosing_function_ids_json"],
+                            details.irritancy,
+                            details.comedogenicity,
+                            details.details_text,
+                            payload["cosing_cas_numbers_json"],
+                            payload["cosing_ec_numbers_json"],
+                            payload["cosing_identified_ingredients_json"],
+                            payload["cosing_regulation_provisions_json"],
+                            payload["quick_facts_json"],
+                            payload["proof_references_json"],
+                            now,
+                            now,
+                        ),
+                    )
+                except sqlite3.IntegrityError as exc:  # pragma: no cover - rare collision
+                    exc_str = str(exc)
+                    if "ingredients.id" in exc_str:
+                        # ID collision, try again with new ID
+                        continue
+                    elif "ingredients.url" in exc_str:
+                        # URL already exists (race condition), fetch existing record
+                        LOGGER.debug("Ingredient URL %s already exists, fetching existing record", details.url)
+                        existing = self.conn.execute(
+                            """
+                            SELECT id, name, rating_tag, also_called, cosing_function_ids_json,
+                                   irritancy, comedogenicity, details_text, cosing_cas_numbers_json,
+                                   cosing_ec_numbers_json, cosing_identified_ingredients_json,
+                                   cosing_regulation_provisions_json, quick_facts_json,
+                                   proof_references_json, last_updated_at
+                            FROM ingredients
+                            WHERE url = ?
+                            """,
+                            (details.url,),
+                        ).fetchone()
+                        if existing:
+                            # Update existing record instead
+                            changed = False
+                            for column, value in payload.items():
+                                if existing[column] != value:
+                                    changed = True
+                                    break
+                            if changed or not existing["last_updated_at"]:
+                                update_values = {**payload, "last_checked_at": now, "last_updated_at": now}
+                                assignments = ", ".join(f"{column} = ?" for column in update_values)
+                                params = list(update_values.values()) + [existing["id"]]
+                                self.conn.execute(
+                                    f"UPDATE ingredients SET {assignments} WHERE id = ?",
+                                    params,
+                                )
+                            else:
+                                self.conn.execute(
+                                    "UPDATE ingredients SET last_checked_at = ? WHERE id = ?",
+                                    (now, existing["id"]),
+                                )
+                            result_id = str(existing["id"])
+                            break
+                        else:
+                            # Record disappeared, try INSERT again
+                            continue
+                    else:
+                        # Unknown integrity error, re-raise
+                        raise
+                # Successful INSERT
+                result_id = ingredient_id
+                break
+        else:
+            changed = False
+            for column, value in payload.items():
+                if existing[column] != value:
+                    changed = True
+                    break
+            if changed or not existing["last_updated_at"]:
+                update_values = {**payload, "last_checked_at": now, "last_updated_at": now}
+                assignments = ", ".join(f"{column} = ?" for column in update_values)
+                params = list(update_values.values()) + [existing["id"]]
+                self.conn.execute(
+                    f"UPDATE ingredients SET {assignments} WHERE id = ?",
+                    params,
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE ingredients SET last_checked_at = ? WHERE id = ?",
+                    (now, existing["id"]),
+                )
+            result_id = str(existing["id"])
+        row = self.conn.execute(
+            "SELECT id FROM ingredients WHERE url = ?",
+            (details.url,),
+        ).fetchone()
+        if not row:
+            raise RuntimeError(f"Unable to store ingredient {details.url}")
+        return result_id
+
+    def _ensure_ingredient_function(self, info: IngredientFunctionInfo) -> Optional[str]:
+        """Ensure an ingredient function entry exists and return its id."""
+
+        raw_name = self._normalize_whitespace(info.name)
+        if not raw_name:
+            return None
+        row = self.conn.execute(
+            """
+            SELECT id, name
+            FROM functions
+            WHERE LOWER(name) = LOWER(?)
+            """,
+            (raw_name,),
+        ).fetchone()
+        if row:
+            stored_name = self._normalize_whitespace(row["name"] or "")
+            if stored_name != raw_name:
+                self.conn.execute(
+                    "UPDATE functions SET name = ? WHERE id = ?",
+                    (raw_name, row["id"]),
+                )
+            return str(row["id"])
+        while True:
+            function_id = self._generate_id()
+            try:
+                self.conn.execute(
+                    "INSERT INTO functions (id, name) VALUES (?, ?)",
+                    (function_id, raw_name),
+                )
+            except sqlite3.IntegrityError as exc:  # pragma: no cover - rare id collision
+                if "functions.id" in str(exc):
+                    continue
+                raise
+            return function_id
+
+    # ------------------------------------------------------------------
+    # Resource management
+    # ------------------------------------------------------------------
+    def _shutdown_cosing_resources(self) -> None:
+        """Release any Playwright resources that may have been allocated."""
+
+        if self._cosing_page is not None:
+            try:
+                self._cosing_page.close()
+            except PlaywrightError:
+                LOGGER.debug("Ignoring Playwright page close error", exc_info=True)
+            self._cosing_page = None
+        if self._cosing_context is not None:
+            try:
+                self._cosing_context.close()
+            except PlaywrightError:
+                LOGGER.debug("Ignoring Playwright context close error", exc_info=True)
+            self._cosing_context = None
+        if self._cosing_browser is not None:
+            try:
+                self._cosing_browser.close()
+            except PlaywrightError:
+                LOGGER.debug("Ignoring Playwright browser close error", exc_info=True)
+            self._cosing_browser = None
+        if self._cosing_playwright is not None:
+            try:
+                self._cosing_playwright.stop()
+            except PlaywrightError:
+                LOGGER.debug("Ignoring Playwright shutdown error", exc_info=True)
+            self._cosing_playwright = None
+

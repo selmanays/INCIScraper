@@ -14,15 +14,6 @@ INGREDIENT_FETCH_ATTEMPTS = 6
 INGREDIENT_PLACEHOLDER_MARKER = "__INCISCRAPER_PLACEHOLDER__"
 PROGRESS_LOG_INTERVAL = 10
 
-# Performance optimization constants
-DEFAULT_MAX_WORKERS = 5
-DEFAULT_BATCH_SIZE = 50
-DEFAULT_IMAGE_WORKERS = 3
-MIN_RATE_LIMIT = 0.1  # minimum delay between requests (seconds)
-MAX_RATE_LIMIT = 2.0  # maximum delay between requests (seconds)
-ADAPTIVE_RATE_FACTOR = 1.5  # factor to adjust rate limiting
-CACHE_SIZE_LIMIT = 10000  # maximum number of items in memory cache
-
 
 EXPECTED_SCHEMA: Dict[str, Set[str]] = {
     "brands": {
@@ -73,18 +64,7 @@ EXPECTED_SCHEMA: Dict[str, Set[str]] = {
         "id",
         "name",
     },
-    "frees": {
-        "id",
-        "tag",
-        "tooltip",
-    },
     "metadata": {"key", "value"},
-    "cosing_cache": {
-        "lookup_key",
-        "detail_html",
-        "source_term",
-        "last_updated_at",
-    },
 }
 
 
@@ -110,9 +90,6 @@ ADDITIONAL_COLUMN_DEFINITIONS: Dict[str, Dict[str, str]] = {
         "cosing_function_ids_json": "cosing_function_ids_json TEXT",
         "quick_facts_json": "quick_facts_json TEXT",
         "proof_references_json": "proof_references_json TEXT",
-    },
-    "cosing_cache": {
-        "last_updated_at": "last_updated_at TEXT",
     },
 }
 

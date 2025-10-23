@@ -64,6 +64,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--max-brands",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Limit the total number of brands to scrape. Useful for testing/sampling. "
+            "Ignored for product/details steps."
+        ),
+    )
+    parser.add_argument(
         "--resume/--no-resume",
         dest="resume",
         default=False,
@@ -89,36 +99,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--sample-data",
         action="store_true",
         help=(
-            "Generate a small verification dataset instead of running the full pipeline. "
-            "The sample database will contain three brands with a single fully scraped "
-            "product each."
+            "Generate a sample dataset instead of running the full pipeline. "
+            "The sample database will contain 10 brands with ALL their products fully scraped."
         ),
     )
     parser.add_argument(
-        "--max-workers",
+        "--sample-brands",
         type=int,
-        default=5,
+        default=10,
         metavar="N",
-        help="Maximum number of parallel workers for HTTP requests and processing (default: 5)",
+        help="Number of brands to include in sample dataset (default: 10)",
     )
     parser.add_argument(
-        "--batch-size",
+        "--sample-products",
         type=int,
-        default=50,
+        default=None,
         metavar="N",
-        help="Batch size for database operations (default: 50)",
-    )
-    parser.add_argument(
-        "--image-workers",
-        type=int,
-        default=3,
-        metavar="N",
-        help="Number of parallel workers for image processing (default: 3)",
-    )
-    parser.add_argument(
-        "--skip-images",
-        action="store_true",
-        help="Skip image downloading and processing (useful for testing)",
+        help="Max products per brand in sample dataset. If not set, scrapes ALL products.",
     )
     return parser
 
@@ -129,17 +126,25 @@ def configure_logging(level: str, *, log_to_file: bool = False) -> Optional[Path
     Türkçe: Komut satırı aracının günlük yapılandırmasını verilen ayrıntı
     seviyesine göre kurar.
     """
+    import sys
+    
     log_level = getattr(logging, level.upper(), logging.ERROR)
-    handlers = [logging.StreamHandler()]
+    
+    # StreamHandler varsayılan olarak stderr kullanır, biz stdout'a yönlendiriyoruz
+    # Bu sayede UI'deki stdout/stderr ayrımı düzgün çalışır
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    handlers = [stdout_handler]
+    
     log_file_path: Optional[Path] = None
     if log_to_file:
         logs_dir = Path("data") / "logs"
         logs_dir.mkdir(parents=True, exist_ok=True)
         log_file_path = logs_dir / "inciscraper.log"
         handlers.append(logging.FileHandler(log_file_path, encoding="utf-8"))
+    
     logging.basicConfig(
         level=log_level,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        format="%(message)s",  # Sadece mesajı yaz, UI tarafında timestamp ekleniyor
         handlers=handlers,
         force=True,
     )
@@ -177,15 +182,24 @@ def main(argv: list[str] | None = None) -> int:
         image_dir=str(images_dir),
         base_url=args.base_url,
         alternate_base_urls=args.alternate_base_url,
-        max_workers=args.max_workers,
-        batch_size=args.batch_size,
-        image_workers=args.image_workers,
-        skip_images=args.skip_images,
     )
     try:
         if args.sample_data:
-            logging.info("Generating sample dataset (3 brands × 1 product each)")
-            scraper.generate_sample_dataset(brand_count=3, products_per_brand=1)
+            if args.sample_products is not None:
+                logging.info(
+                    "Generating sample dataset (%s brands × %s products each)",
+                    args.sample_brands,
+                    args.sample_products,
+                )
+            else:
+                logging.info(
+                    "Generating sample dataset (%s brands × ALL products)",
+                    args.sample_brands,
+                )
+            scraper.generate_sample_dataset(
+                brand_count=args.sample_brands,
+                products_per_brand=args.sample_products,
+            )
         else:
             if args.resume:
                 scraper.resume_incomplete_metadata()
@@ -194,13 +208,13 @@ def main(argv: list[str] | None = None) -> int:
             brand_pages_text = (
                 str(brand_pages_remaining) if brand_pages_remaining is not None else "unknown"
             )
-            logging.info(
+            logging.debug(
                 "Initial workload – brand pages remaining: %s, brands pending products: %s, products pending details: %s",
                 brand_pages_text,
                 summary["brands_pending_products"],
                 summary["products_pending_details"],
             )
-            logging.info(
+            logging.debug(
                 "Database snapshot – stored brands: %s, stored products: %s",
                 summary["brands_total"],
                 summary["products_total"],
@@ -210,6 +224,7 @@ def main(argv: list[str] | None = None) -> int:
                     scraper.scrape_brands(
                         reset_offset=not args.resume,
                         max_pages=args.max_pages,
+                        max_brands=args.max_brands,
                     )
                 else:
                     logging.info("Skipping brand collection – already complete")

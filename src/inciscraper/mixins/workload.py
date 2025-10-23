@@ -52,7 +52,7 @@ class WorkloadMixin:
             message = f"{stage} progress: processed {processed} item(s)"
         if extra:
             message = f"{message} – {extra}"
-        LOGGER.info(message)
+        LOGGER.debug(message)  # DEBUG level - kullanıcıya gösterilmemeli
 
     def get_workload_summary(self) -> Dict[str, Optional[int]]:
         """Return a snapshot summarising remaining scraping work."""
